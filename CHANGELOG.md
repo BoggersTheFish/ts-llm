@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned
 
-- Neural-ODE integration (torchdiffeq), optional validation corpora, phrase-level proto-concepts.
+- Phase 3: self-improvement loop, constraint graphs.
+
+## [0.5.0] — 2026-03-25
+
+### Added
+
+- **`attractor_llm/hierarchy.py`:** `HierarchicalProtoEmbedder` (token + phrase tables, combined `concat` signal) and `MultiTimescaleMultiHeadDynamics` (fast/slow half-state, each `MultiHeadDynamics` with `dt/ratio` and weaker cubic on the slow block).
+- **`TorchAttractorLanguageModel`:** `hierarchy_levels`, `timescale_ratio`, `phrase_vocab_size`, `phrase_span`, `phrase_attractors`; rolling phrase id for slow path; logits still from combined state vs token attractors.
+- **CLI:** `--hierarchy-levels`, `--timescale-ratio`, `--phrase-vocab-size`, `--phrase-span`, `--no-phrase-attractors`; validation (even `state_dim` / `heads`, `multihead` only).
+- **Checkpoints:** `config_dict` + `load_checkpoint` round-trip for hierarchy fields; infer `hierarchy_levels` from `dynamics.fast.*` weights when missing.
+
+### Changed
+
+- **`torch_core._vector_field_dispatch`:** uses `unified_drift` when present so `torchdiffeq` matches multi-timescale Euler semantics.
 
 ## [0.3.0] — 2026-03-25
 

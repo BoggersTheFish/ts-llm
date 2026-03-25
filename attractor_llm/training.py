@@ -27,6 +27,12 @@ def _infer_dynamics_type(state_dict: dict[str, Any]) -> str:
     return "multihead"
 
 
+def _infer_hierarchy_levels(state_dict: dict[str, Any]) -> int:
+    if any(k.startswith("dynamics.fast.") for k in state_dict):
+        return 2
+    return 1
+
+
 class TextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """
     Sliding windows over token ids from ``text_file`` (UTF-8) or a synthetic stream.
@@ -137,6 +143,11 @@ def load_checkpoint(
             "adaptive_ode": ckpt.get("adaptive_ode", False),
             "ode_atol": ckpt.get("ode_atol", 1e-4),
             "ode_rtol": ckpt.get("ode_rtol", 1e-4),
+            "hierarchy_levels": ckpt.get("hierarchy_levels", 1),
+            "timescale_ratio": ckpt.get("timescale_ratio", 4.0),
+            "phrase_vocab_size": ckpt.get("phrase_vocab_size", 8192),
+            "phrase_span": ckpt.get("phrase_span", 4),
+            "phrase_attractors": ckpt.get("phrase_attractors", True),
         }
 
     sd = ckpt["model_state"]
@@ -153,6 +164,11 @@ def load_checkpoint(
 
     vocab_list = list(ckpt.get("vocab") or ([] if tokenizer is not None else list(DEFAULT_VOCAB)))
 
+    rnk = ckpt.get("rank", 64)
+    rank_i = int(rnk) if rnk is not None else 64
+
+    hierarchy_levels = int(ckpt.get("hierarchy_levels", _infer_hierarchy_levels(sd)))
+
     model = TorchAttractorLanguageModel(
         state_dim=int(ckpt["state_dim"]),
         vocab=vocab_list,
@@ -163,12 +179,17 @@ def load_checkpoint(
         num_converge_steps=int(ckpt.get("num_converge_steps", 12)),
         dynamics_type=dynamics_type,
         num_heads=int(ckpt.get("num_heads", 4)),
-        rank=int(ckpt.get("rank", 64)),
+        rank=rank_i,
         coupling=float(ckpt.get("coupling", 0.01)),
         ode_solver=str(ckpt.get("ode_solver", "euler")),
         adaptive_ode=bool(ckpt.get("adaptive_ode", False)),
         ode_atol=float(ckpt.get("ode_atol", 1e-4)),
         ode_rtol=float(ckpt.get("ode_rtol", 1e-4)),
+        hierarchy_levels=hierarchy_levels,
+        timescale_ratio=float(ckpt.get("timescale_ratio", 4.0)),
+        phrase_vocab_size=int(ckpt.get("phrase_vocab_size", 8192)),
+        phrase_span=int(ckpt.get("phrase_span", 4)),
+        phrase_attractors=bool(ckpt.get("phrase_attractors", True)),
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device)

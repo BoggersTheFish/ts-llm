@@ -496,6 +496,10 @@ class MultiHeadDynamics(nn.Module):
 
 
 def _vector_field_dispatch(dynamics: nn.Module, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
+    # Multi-timescale: single global time for torchdiffeq (see hierarchy.MultiTimescaleMultiHeadDynamics)
+    unified = getattr(dynamics, "unified_drift", None)
+    if callable(unified):
+        return unified(state, signal)
     if isinstance(dynamics, MultiHeadDynamics):
         return dynamics.drift(state, signal)
     if isinstance(dynamics, AttractorDynamics):

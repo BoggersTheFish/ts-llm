@@ -1,6 +1,6 @@
 # ts-llm
 
-**Version 0.3.0** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Version 0.5.0** — see [CHANGELOG.md](CHANGELOG.md) for release history.
 
 A **language reasoning substrate** built from **nonlinear attractor dynamics**. The repository contains:
 
@@ -31,6 +31,10 @@ with learnable temperature \(\tau > 0\). Training minimizes **cross-entropy** of
 
 The default PyTorch dynamics module partitions the state into \(H\) heads. Each head uses a **low-rank** diffusion
 \(A_h = U_h V_h + \mathrm{diag}(d_h)\) plus the same cubic term, and a small **coupling** residual mixes heads toward their mean. Use `--dynamics full` for the original **dense** \(D\times D\) diffusion matrix (Phase 1 checkpoints).
+
+### Phase 2.4 – hierarchical multi-timescale (optional)
+
+With **`--hierarchy-levels 2`** (and **`--dynamics multihead`**), the state splits into **fast** and **slow** halves of \(\mathbb{R}^D\). The **fast** half uses token-level signals (syntax); the **slow** half uses a learned **phrase** table (8192 rows by default) with a rolling phrase id over the last **`--phrase-span`** tokens. The slow block uses smaller \(\Delta t\) and weaker cubic gain (``1/`` **`--timescale-ratio`**) so it evolves more slowly. Next-token logits still use negative-distance to the **combined** state and token-level proto-attractors. Requires **even** `--state-dim` and **even** `--heads`.
 
 ---
 
@@ -113,6 +117,11 @@ Checkpoints are written under **`checkpoints/`** (see `.gitignore`).
 | `--heads` | Number of attractor heads (default **4**) |
 | `--rank` | Low-rank width per head (default **64**) |
 | `--coupling` | Cross-head coupling strength (default **0.01**) |
+| `--hierarchy-levels` | `1` (default) or `2` (fast + slow phrase timescales) |
+| `--timescale-ratio` | Slow vs fast dynamics (default **4**); slow uses `dt/ratio`, cubic `/ratio` |
+| `--phrase-vocab-size` | Phrase embedding rows (default **8192**) |
+| `--phrase-span` | Rolling phrase hash window (default **4**) |
+| `--no-phrase-attractors` | Slow path uses `token_id % phrase_vocab` instead of rolling phrase |
 | `--encoding` | tiktoken encoding name (default `gpt2`) |
 | `--vocab-cap` | Max token id + 1 for embedding / logits |
 | `--no-tiktoken` | Word-list tokenizer |
@@ -153,6 +162,7 @@ ts-llm/
 │   ├── torch_model.py    # TorchAttractorLanguageModel
 │   ├── training.py       # TextDataset, checkpoints, train_epoch
 │   ├── datasets.py       # Optional TinyStories (confirm-before-download)
+│   ├── hierarchy.py      # Multi-timescale + hierarchical proto-embedder
 │   └── model.py          # NumPy toy + DEFAULT_VOCAB
 ├── run_attractor_llm.py
 ├── train.py

@@ -11,6 +11,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from attractor_llm.embeddings import LearnableProtoEmbedder
+from attractor_llm.hierarchy import (
+    HierarchicalProtoEmbedder,
+    MultiTimescaleMultiHeadDynamics,
+    rolling_phrase_id,
+)
 from attractor_llm.model import DEFAULT_VOCAB
 from attractor_llm.torch_core import AttractorDynamics, MultiHeadDynamics, NeuralODEWrapper
 
@@ -33,6 +38,9 @@ class TorchAttractorLanguageModel(nn.Module):
     Convergence uses :class:`~attractor_llm.torch_core.NeuralODEWrapper`: default **manual Euler**
     matches the legacy discrete loop; optional ``rk4`` / ``dopri5`` / adaptive integration use
     :mod:`torchdiffeq` on the same explicit vector field.
+
+    With ``hierarchy_levels=2``, use :class:`~attractor_llm.hierarchy.HierarchicalProtoEmbedder`
+    and :class:`~attractor_llm.hierarchy.MultiTimescaleMultiHeadDynamics` (fast token + slow phrase).
     """
 
     def __init__(
@@ -53,6 +61,11 @@ class TorchAttractorLanguageModel(nn.Module):
         adaptive_ode: bool = False,
         ode_atol: float = 1e-4,
         ode_rtol: float = 1e-4,
+        hierarchy_levels: int = 1,
+        timescale_ratio: float = 4.0,
+        phrase_vocab_size: int = 8192,
+        phrase_span: int = 4,
+        phrase_attractors: bool = True,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -60,6 +73,11 @@ class TorchAttractorLanguageModel(nn.Module):
         self.num_converge_steps = num_converge_steps
         self.tokenizer: AttractorTokenizer | None = tokenizer
         self._dynamics_type = dynamics_type or "multihead"
+        self._hierarchy_levels = int(hierarchy_levels)
+        self._timescale_ratio = float(timescale_ratio)
+        self._phrase_vocab_size = int(phrase_vocab_size)
+        self._phrase_span = int(phrase_span)
+        self._phrase_attractors = bool(phrase_attractors)
         self.ode = NeuralODEWrapper(
             ode_solver=ode_solver,
             adaptive_ode=adaptive_ode,
@@ -67,16 +85,51 @@ class TorchAttractorLanguageModel(nn.Module):
             rtol=ode_rtol,
         )
 
+        if self._hierarchy_levels > 1:
+            if self._dynamics_type == "full":
+                raise ValueError("hierarchy_levels > 1 requires --dynamics multihead (not full).")
+            if state_dim % 2 != 0:
+                raise ValueError("state_dim must be even when hierarchy_levels > 1")
+            if num_heads % 2 != 0:
+                raise ValueError("num_heads must be even when hierarchy_levels > 1")
+
         if tokenizer is not None:
             vs = tokenizer.get_vocab_size()
             self._vocab_list: list[str] = list(vocab) if vocab is not None else []
-            self.embedder = LearnableProtoEmbedder(dim=state_dim, vocab=self._vocab_list, vocab_size=vs)
+            if self._hierarchy_levels > 1:
+                self.embedder = HierarchicalProtoEmbedder(
+                    state_dim=state_dim,
+                    tokenizer_vocab_size=vs,
+                    phrase_vocab_size=self._phrase_vocab_size,
+                    vocab=self._vocab_list,
+                )
+            else:
+                self.embedder = LearnableProtoEmbedder(dim=state_dim, vocab=self._vocab_list, vocab_size=vs)
         else:
             self._vocab_list = list(vocab) if vocab is not None else list(DEFAULT_VOCAB)
-            self.embedder = LearnableProtoEmbedder(dim=state_dim, vocab=self._vocab_list)
+            if self._hierarchy_levels > 1:
+                vs = len(self._vocab_list)
+                self.embedder = HierarchicalProtoEmbedder(
+                    state_dim=state_dim,
+                    tokenizer_vocab_size=vs,
+                    phrase_vocab_size=self._phrase_vocab_size,
+                    vocab=self._vocab_list,
+                )
+            else:
+                self.embedder = LearnableProtoEmbedder(dim=state_dim, vocab=self._vocab_list)
 
         if self._dynamics_type == "full":
             self.dynamics: nn.Module = AttractorDynamics(dim=state_dim, cubic_scale=cubic_scale, dt=dt)
+        elif self._hierarchy_levels > 1:
+            self.dynamics = MultiTimescaleMultiHeadDynamics(
+                state_dim=state_dim,
+                num_heads=num_heads,
+                rank=rank,
+                cubic_scale=cubic_scale,
+                dt=dt,
+                coupling=coupling,
+                timescale_ratio=self._timescale_ratio,
+            )
         else:
             self.dynamics = MultiHeadDynamics(
                 state_dim=state_dim,
@@ -89,9 +142,10 @@ class TorchAttractorLanguageModel(nn.Module):
 
         self.temperature = nn.Parameter(torch.tensor(0.1))
 
+        v_rows = self.embedder.vocab_size
         self.register_buffer(
             "_attractors_cache",
-            torch.zeros(self.embedder.vocab_size, state_dim),
+            torch.zeros(v_rows, state_dim),
         )
 
     @property
@@ -103,7 +157,25 @@ class TorchAttractorLanguageModel(nn.Module):
         return self.temperature.clamp(min=1e-6)
 
     def _dynamics_dt(self) -> float:
+        if isinstance(self.dynamics, MultiTimescaleMultiHeadDynamics):
+            return float(self.dynamics.fast.dt)
         return float(self.dynamics.dt)
+
+    def _phrase_id(self, input_ids: torch.Tensor, t: int) -> int:
+        if self._hierarchy_levels <= 1:
+            return 0
+        if not self._phrase_attractors:
+            return int(input_ids[t].item()) % self._phrase_vocab_size
+        return rolling_phrase_id(input_ids, t, self._phrase_span, self._phrase_vocab_size)
+
+    def _signal_for_position(self, input_ids: torch.Tensor, t: int, device: torch.device) -> torch.Tensor:
+        if self._hierarchy_levels > 1:
+            emb = self.embedder
+            assert isinstance(emb, HierarchicalProtoEmbedder)
+            tid = int(input_ids[t].item())
+            pid = self._phrase_id(input_ids, t)
+            return emb.signals_from_token_and_phrase(tid, pid, device=device)
+        return self.embedder(input_ids[t : t + 1]).squeeze(0)
 
     def _converge(
         self,
@@ -185,7 +257,7 @@ class TorchAttractorLanguageModel(nn.Module):
 
         total = torch.zeros((), device=device)
         for t in range(L):
-            sig = self.embedder(input_ids[t : t + 1]).squeeze(0)
+            sig = self._signal_for_position(input_ids, t, device)
             state = self._converge(sig, state, num_steps=nc)
             logits = self.logits_from_state(state, attractors)
             total = total + F.cross_entropy(logits, target_ids[t : t + 1])
@@ -245,8 +317,12 @@ class TorchAttractorLanguageModel(nn.Module):
         state = torch.zeros(self.state_dim, device=device, dtype=torch.float32)
         attractors = self._precompute_attractors(num_steps=na)
 
-        for tid in ids:
-            sig = self.embedder(torch.tensor([tid], device=device, dtype=torch.long)).squeeze(0)
+        seq_tensor = torch.tensor(ids, dtype=torch.long, device=device)
+        for t in range(len(ids)):
+            if self._hierarchy_levels > 1:
+                sig = self._signal_for_position(seq_tensor, t, device)
+            else:
+                sig = self.embedder(seq_tensor[t : t + 1]).squeeze(0)
             state = self._converge(sig, state, num_steps=nc)
 
         out_ids: list[int] = []
@@ -254,7 +330,12 @@ class TorchAttractorLanguageModel(nn.Module):
             logits = self.logits_from_state(state, attractors)
             nxt = int(logits.argmax(dim=-1).item())
             out_ids.append(nxt)
-            sig = self.embedder(torch.tensor([nxt], device=device, dtype=torch.long)).squeeze(0)
+            seq_tensor = torch.cat([seq_tensor, torch.tensor([nxt], device=device, dtype=torch.long)])
+            t = int(seq_tensor.numel()) - 1
+            if self._hierarchy_levels > 1:
+                sig = self._signal_for_position(seq_tensor, t, device)
+            else:
+                sig = self.embedder(torch.tensor([nxt], device=device, dtype=torch.long)).squeeze(0)
             state = self._converge(sig, state, num_steps=nc)
 
         if self.tokenizer is not None:
@@ -269,16 +350,29 @@ class TorchAttractorLanguageModel(nn.Module):
             "vocab_size": self.embedder.vocab_size,
             "num_attractor_steps": self.num_attractor_steps,
             "num_converge_steps": self.num_converge_steps,
-            "cubic_scale": float(self.dynamics.cubic_scale.detach().cpu().item()),
-            "dt": float(self.dynamics.dt),
             "tokenizer_config": self._tokenizer_config(),
             "dynamics_type": self._dynamics_type,
+            "hierarchy_levels": self._hierarchy_levels,
+            "timescale_ratio": self._timescale_ratio,
+            "phrase_vocab_size": self._phrase_vocab_size,
+            "phrase_span": self._phrase_span,
+            "phrase_attractors": self._phrase_attractors,
         }
-        if isinstance(self.dynamics, MultiHeadDynamics):
+        if isinstance(self.dynamics, MultiTimescaleMultiHeadDynamics):
+            d["cubic_scale"] = float(self.dynamics.fast.cubic_scale.detach().cpu().item())
+            d["dt"] = float(self.dynamics.fast.dt)
+            d["num_heads"] = self.dynamics.fast.num_heads * 2
+            d["rank"] = self.dynamics.fast.rank
+            d["coupling"] = float(self.dynamics.fast.coupling.detach().cpu().item())
+        elif isinstance(self.dynamics, MultiHeadDynamics):
+            d["cubic_scale"] = float(self.dynamics.cubic_scale.detach().cpu().item())
+            d["dt"] = float(self.dynamics.dt)
             d["num_heads"] = self.dynamics.num_heads
             d["rank"] = self.dynamics.rank
             d["coupling"] = float(self.dynamics.coupling.detach().cpu().item())
         else:
+            d["cubic_scale"] = float(self.dynamics.cubic_scale.detach().cpu().item())
+            d["dt"] = float(self.dynamics.dt)
             d["num_heads"] = 1
             d["rank"] = None
             d["coupling"] = None

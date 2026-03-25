@@ -146,6 +146,16 @@ def _run_train(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+    if args.hierarchy_levels > 1:
+        if args.dynamics != "multihead":
+            print("Error: --hierarchy-levels > 1 requires --dynamics multihead.", file=sys.stderr)
+            sys.exit(1)
+        if args.state_dim % 2 != 0:
+            print("Error: --state-dim must be even for hierarchical (fast/slow) dynamics.", file=sys.stderr)
+            sys.exit(1)
+        if args.heads % 2 != 0:
+            print("Error: --heads must be even for multi-timescale dynamics.", file=sys.stderr)
+            sys.exit(1)
 
     if args.checkpoint and Path(args.checkpoint).exists():
         model, ckpt = load_checkpoint(args.checkpoint, device=device)
@@ -168,6 +178,11 @@ def _run_train(args: argparse.Namespace) -> None:
             adaptive_ode=args.adaptive,
             ode_atol=args.ode_atol,
             ode_rtol=args.ode_rtol,
+            hierarchy_levels=args.hierarchy_levels,
+            timescale_ratio=args.timescale_ratio,
+            phrase_vocab_size=args.phrase_vocab_size,
+            phrase_span=args.phrase_span,
+            phrase_attractors=not args.no_phrase_attractors,
         ).to(device)
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -243,6 +258,35 @@ def main() -> None:
     p.add_argument("--heads", type=int, default=4, help="Number of hierarchical attractor heads")
     p.add_argument("--rank", type=int, default=64, help="Low-rank factor rank per head")
     p.add_argument("--coupling", type=float, default=0.01, help="Cross-head residual coupling strength")
+    p.add_argument(
+        "--hierarchy-levels",
+        type=int,
+        default=1,
+        help="1 = single timescale (default); 2 = fast token + slow phrase multi-timescale",
+    )
+    p.add_argument(
+        "--timescale-ratio",
+        type=float,
+        default=4.0,
+        help="Slow vs fast: slow block uses dt/ratio and cubic_scale/ratio",
+    )
+    p.add_argument(
+        "--phrase-vocab-size",
+        type=int,
+        default=8192,
+        help="Learned phrase embedding width (hierarchy level 1)",
+    )
+    p.add_argument(
+        "--phrase-span",
+        type=int,
+        default=4,
+        help="Rolling phrase id uses this many recent tokens (inclusive)",
+    )
+    p.add_argument(
+        "--no-phrase-attractors",
+        action="store_true",
+        help="Map slow path by token id %% phrase_vocab instead of rolling phrase hash",
+    )
     p.add_argument(
         "--ode-solver",
         choices=["euler", "rk4", "dopri5"],
