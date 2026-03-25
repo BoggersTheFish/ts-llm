@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 from attractor_llm.embeddings import LearnableProtoEmbedder
 from attractor_llm.model import DEFAULT_VOCAB
-from attractor_llm.torch_core import AttractorDynamics
+from attractor_llm.torch_core import AttractorDynamics, MultiHeadDynamics, NeuralODEWrapper
 
 if TYPE_CHECKING:
     from attractor_llm.tokenizer import AttractorTokenizer
@@ -20,20 +20,24 @@ if TYPE_CHECKING:
 
 class TorchAttractorLanguageModel(nn.Module):
     r"""
-    Trainable attractor LM: internal state follows :class:`AttractorDynamics`; next-token
-    logits are
+    Trainable attractor LM: internal state follows :class:`~attractor_llm.torch_core.AttractorDynamics`
+    (full diffusion) or :class:`~attractor_llm.torch_core.MultiHeadDynamics` (low-rank multi-head);
+    next-token logits are
 
     .. math::
 
         \ell_v(s) = -\frac{\|s - a_v\|_2}{\tau},
 
-    where :math:`a_v` is the learned attractor for token :math:`v` (fixed-step flow from
-    zero under signal :math:`u_v`), and :math:`\tau` is a learnable temperature.
+    where :math:`a_v` are learned proto-attractors and :math:`\tau` is a learnable temperature.
+
+    Convergence uses :class:`~attractor_llm.torch_core.NeuralODEWrapper`: default **manual Euler**
+    matches the legacy discrete loop; optional ``rk4`` / ``dopri5`` / adaptive integration use
+    :mod:`torchdiffeq` on the same explicit vector field.
     """
 
     def __init__(
         self,
-        state_dim: int = 128,
+        state_dim: int = 512,
         vocab: list[str] | None = None,
         *,
         tokenizer: AttractorTokenizer | None = None,
@@ -41,12 +45,27 @@ class TorchAttractorLanguageModel(nn.Module):
         dt: float = 0.05,
         num_attractor_steps: int = 16,
         num_converge_steps: int = 12,
+        dynamics_type: str | None = None,
+        num_heads: int = 4,
+        rank: int = 64,
+        coupling: float = 0.01,
+        ode_solver: str = "euler",
+        adaptive_ode: bool = False,
+        ode_atol: float = 1e-4,
+        ode_rtol: float = 1e-4,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
         self.num_attractor_steps = num_attractor_steps
         self.num_converge_steps = num_converge_steps
         self.tokenizer: AttractorTokenizer | None = tokenizer
+        self._dynamics_type = dynamics_type or "multihead"
+        self.ode = NeuralODEWrapper(
+            ode_solver=ode_solver,
+            adaptive_ode=adaptive_ode,
+            atol=ode_atol,
+            rtol=ode_rtol,
+        )
 
         if tokenizer is not None:
             vs = tokenizer.get_vocab_size()
@@ -56,7 +75,18 @@ class TorchAttractorLanguageModel(nn.Module):
             self._vocab_list = list(vocab) if vocab is not None else list(DEFAULT_VOCAB)
             self.embedder = LearnableProtoEmbedder(dim=state_dim, vocab=self._vocab_list)
 
-        self.dynamics = AttractorDynamics(dim=state_dim, cubic_scale=cubic_scale, dt=dt)
+        if self._dynamics_type == "full":
+            self.dynamics: nn.Module = AttractorDynamics(dim=state_dim, cubic_scale=cubic_scale, dt=dt)
+        else:
+            self.dynamics = MultiHeadDynamics(
+                state_dim=state_dim,
+                num_heads=num_heads,
+                rank=rank,
+                cubic_scale=cubic_scale,
+                dt=dt,
+                coupling=coupling,
+            )
+
         self.temperature = nn.Parameter(torch.tensor(0.1))
 
         self.register_buffer(
@@ -71,6 +101,32 @@ class TorchAttractorLanguageModel(nn.Module):
 
     def _tau(self) -> torch.Tensor:
         return self.temperature.clamp(min=1e-6)
+
+    def _dynamics_dt(self) -> float:
+        return float(self.dynamics.dt)
+
+    def _converge(
+        self,
+        signal: torch.Tensor,
+        initial_state: torch.Tensor | None,
+        *,
+        num_steps: int,
+    ) -> torch.Tensor:
+        """Integrate dynamics to a fixed horizon (manual Euler or :mod:`torchdiffeq`)."""
+        return self.ode.converge(
+            self.dynamics,
+            signal,
+            initial_state,
+            num_steps=num_steps,
+            dt=self._dynamics_dt(),
+        )
+
+    def _precompute_attractors(self, num_steps: int) -> torch.Tensor:
+        """Proto-attractors :math:`a_v` for all vocab rows, same path as training."""
+        signals = self.embedder.get_all_signals()
+        if signals.ndim != 2:
+            raise ValueError("embedder.get_all_signals must return (V, D)")
+        return self._converge(signals, None, num_steps=num_steps)
 
     def logits_from_state(
         self,
@@ -125,12 +181,12 @@ class TorchAttractorLanguageModel(nn.Module):
         na = num_attractor_steps if num_attractor_steps is not None else self.num_attractor_steps
 
         state = torch.zeros(self.state_dim, device=device, dtype=torch.float32)
-        attractors = self.dynamics.precompute_attractors(self.embedder, num_steps=na)
+        attractors = self._precompute_attractors(num_steps=na)
 
         total = torch.zeros((), device=device)
         for t in range(L):
             sig = self.embedder(input_ids[t : t + 1]).squeeze(0)
-            state = self.dynamics.converge_fixed(sig, initial_state=state, num_steps=nc)
+            state = self._converge(sig, state, num_steps=nc)
             logits = self.logits_from_state(state, attractors)
             total = total + F.cross_entropy(logits, target_ids[t : t + 1])
         return total / max(L, 1)
@@ -172,7 +228,7 @@ class TorchAttractorLanguageModel(nn.Module):
         num_converge_steps: int | None = None,
         num_attractor_steps: int | None = None,
     ) -> str:
-        """Greedy generation from distance logits; decodes with :class:`~attractor_llm.tokenizer.AttractorTokenizer` when set."""
+        """Greedy generation from distance logits; decodes with tokenizer when set."""
         self.eval()
         device = next(self.parameters()).device
         nc = num_converge_steps if num_converge_steps is not None else self.num_converge_steps
@@ -187,11 +243,11 @@ class TorchAttractorLanguageModel(nn.Module):
             ids = [0]
 
         state = torch.zeros(self.state_dim, device=device, dtype=torch.float32)
-        attractors = self.dynamics.precompute_attractors(self.embedder, num_steps=na)
+        attractors = self._precompute_attractors(num_steps=na)
 
         for tid in ids:
             sig = self.embedder(torch.tensor([tid], device=device, dtype=torch.long)).squeeze(0)
-            state = self.dynamics.converge_fixed(sig, initial_state=state, num_steps=nc)
+            state = self._converge(sig, state, num_steps=nc)
 
         out_ids: list[int] = []
         for _ in range(max_tokens):
@@ -199,7 +255,7 @@ class TorchAttractorLanguageModel(nn.Module):
             nxt = int(logits.argmax(dim=-1).item())
             out_ids.append(nxt)
             sig = self.embedder(torch.tensor([nxt], device=device, dtype=torch.long)).squeeze(0)
-            state = self.dynamics.converge_fixed(sig, initial_state=state, num_steps=nc)
+            state = self._converge(sig, state, num_steps=nc)
 
         if self.tokenizer is not None:
             return self.tokenizer.decode(out_ids)
@@ -207,7 +263,7 @@ class TorchAttractorLanguageModel(nn.Module):
 
     def config_dict(self) -> dict[str, object]:
         """Serializable hyperparameters for checkpointing."""
-        return {
+        d: dict[str, object] = {
             "state_dim": self.state_dim,
             "vocab": list(self._vocab_list),
             "vocab_size": self.embedder.vocab_size,
@@ -216,7 +272,21 @@ class TorchAttractorLanguageModel(nn.Module):
             "cubic_scale": float(self.dynamics.cubic_scale.detach().cpu().item()),
             "dt": float(self.dynamics.dt),
             "tokenizer_config": self._tokenizer_config(),
+            "dynamics_type": self._dynamics_type,
         }
+        if isinstance(self.dynamics, MultiHeadDynamics):
+            d["num_heads"] = self.dynamics.num_heads
+            d["rank"] = self.dynamics.rank
+            d["coupling"] = float(self.dynamics.coupling.detach().cpu().item())
+        else:
+            d["num_heads"] = 1
+            d["rank"] = None
+            d["coupling"] = None
+        d["ode_solver"] = self.ode.ode_solver
+        d["adaptive_ode"] = self.ode.adaptive_ode
+        d["ode_atol"] = self.ode.atol
+        d["ode_rtol"] = self.ode.rtol
+        return d
 
     def _tokenizer_config(self) -> dict[str, object] | None:
         if self.tokenizer is None:
@@ -245,7 +315,7 @@ class TorchAttractorLanguageModel(nn.Module):
 
 def synthetic_training_demo(
     *,
-    state_dim: int = 64,
+    state_dim: int = 128,
     steps: int = 50,
     lr: float = 0.05,
     device: torch.device | None = None,
@@ -259,6 +329,7 @@ def synthetic_training_demo(
     torch.manual_seed(0)
     m = TorchAttractorLanguageModel(
         state_dim=state_dim,
+        num_heads=4,
         num_attractor_steps=8,
         num_converge_steps=8,
     ).to(device)

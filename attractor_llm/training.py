@@ -21,11 +21,21 @@ def _torch_load(path: str | Path, map_location: torch.device | str | None = None
         return torch.load(path, map_location=map_location)
 
 
+def _infer_dynamics_type(state_dict: dict[str, Any]) -> str:
+    if any(k.startswith("dynamics.diffusion") for k in state_dict):
+        return "full"
+    return "multihead"
+
+
 class TextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """
     Sliding windows over token ids from ``text_file`` (UTF-8) or a synthetic stream.
 
     Uses :class:`~attractor_llm.tokenizer.AttractorTokenizer` for subword or word ids.
+
+    With ``val_split`` in ``(0, 1)``, the token stream is partitioned into train / val
+    slices (``split`` is ``"train"`` or ``"val"``). For TinyStories, use
+    :class:`~attractor_llm.datasets.TinyStoriesDataset` instead.
     """
 
     def __init__(
@@ -34,7 +44,19 @@ class TextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         *,
         tokenizer: AttractorTokenizer | None = None,
         seq_len: int = 16,
+        split: str = "train",
+        val_split: float = 0.0,
+        dataset_name: str | None = None,
     ) -> None:
+        if dataset_name == "tinystories":
+            raise ValueError(
+                "TinyStories is loaded via attractor_llm.datasets.TinyStoriesDataset, not TextDataset."
+            )
+        if split not in ("train", "val"):
+            raise ValueError("split must be 'train' or 'val'")
+        if not 0.0 <= val_split < 1.0:
+            raise ValueError("val_split must be in [0, 1)")
+
         self.tokenizer = tokenizer or AttractorTokenizer(use_tiktoken=False)
         self.seq_len = seq_len
 
@@ -44,6 +66,10 @@ class TextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         else:
             syn = " ".join((["high", "low", "mind", "time", "change"] * 200))
             self.ids = self.tokenizer.encode(syn)
+
+        if val_split > 0.0:
+            split_idx = int(len(self.ids) * (1.0 - val_split))
+            self.ids = self.ids[:split_idx] if split == "train" else self.ids[split_idx:]
 
         if len(self.ids) < self.seq_len + 1:
             pad = self.seq_len + 1 - len(self.ids)
@@ -68,22 +94,15 @@ def save_checkpoint(
     *,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    """Save model weights, vocabulary metadata, tokenizer config, and optional optimizer state."""
+    """Save model weights and full :meth:`~attractor_llm.torch_model.TorchAttractorLanguageModel.config_dict`."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     cfg = model.config_dict()
     state: dict[str, Any] = {
         "model_state": model.state_dict(),
-        "vocab": cfg["vocab"],
-        "vocab_size": model.embedder.vocab_size,
-        "state_dim": model.state_dim,
-        "num_attractor_steps": model.num_attractor_steps,
-        "num_converge_steps": model.num_converge_steps,
-        "cubic_scale": float(model.dynamics.cubic_scale.detach().cpu().item()),
-        "dt": float(model.dynamics.dt),
-        "tokenizer_config": cfg.get("tokenizer_config"),
         "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
     }
+    state.update(cfg)
     if extra:
         state.update(extra)
     torch.save(state, path)
@@ -110,7 +129,18 @@ def load_checkpoint(
             "dt": ckpt.get("dt", 0.05),
             "tokenizer_config": ckpt.get("tokenizer_config"),
             "optimizer_state": ckpt.get("optimizer_state"),
+            "dynamics_type": ckpt.get("dynamics_type"),
+            "num_heads": ckpt.get("num_heads"),
+            "rank": ckpt.get("rank"),
+            "coupling": ckpt.get("coupling"),
+            "ode_solver": ckpt.get("ode_solver", "euler"),
+            "adaptive_ode": ckpt.get("adaptive_ode", False),
+            "ode_atol": ckpt.get("ode_atol", 1e-4),
+            "ode_rtol": ckpt.get("ode_rtol", 1e-4),
         }
+
+    sd = ckpt["model_state"]
+    dynamics_type = ckpt.get("dynamics_type") or _infer_dynamics_type(sd)
 
     tok_cfg = ckpt.get("tokenizer_config")
     tokenizer: AttractorTokenizer | None = None
@@ -131,6 +161,14 @@ def load_checkpoint(
         dt=float(ckpt.get("dt", 0.05)),
         num_attractor_steps=int(ckpt.get("num_attractor_steps", 16)),
         num_converge_steps=int(ckpt.get("num_converge_steps", 12)),
+        dynamics_type=dynamics_type,
+        num_heads=int(ckpt.get("num_heads", 4)),
+        rank=int(ckpt.get("rank", 64)),
+        coupling=float(ckpt.get("coupling", 0.01)),
+        ode_solver=str(ckpt.get("ode_solver", "euler")),
+        adaptive_ode=bool(ckpt.get("adaptive_ode", False)),
+        ode_atol=float(ckpt.get("ode_atol", 1e-4)),
+        ode_rtol=float(ckpt.get("ode_rtol", 1e-4)),
     )
     model.load_state_dict(ckpt["model_state"])
     model.to(device)

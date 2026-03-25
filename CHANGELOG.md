@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned
 
-- Larger-scale training recipes, optional datasets, and further architecture phases (hierarchical attractors, multi-timescale dynamics) as separate milestones.
+- Neural-ODE integration (torchdiffeq), optional validation corpora, phrase-level proto-concepts.
+
+## [0.3.0] — 2026-03-25
+
+### Added
+
+- **Phase 2 Step 1 — scaling substrate:** `MultiHeadDynamics` in `torch_core.py` — low-rank diffusion per head (`U`, `V`, diagonal), shared cubic nonlinearity, weak cross-head coupling; batched `converge_fixed` for attractor precomputation.
+- **`TorchAttractorLanguageModel`:** `dynamics_type` (`multihead` | `full`), `num_heads`, `rank`, `coupling`; default **multi-head** with `state_dim=512`, `num_heads=4`, `rank=64`.
+- **CLI:** `--dynamics`, `--heads`, `--rank`, `--coupling`; `--state-dim` default **512** for train; `--state-dim` divisible by `--heads` when `--dynamics multihead`.
+- **Checkpoints:** `save_checkpoint` merges full `config_dict`; `load_checkpoint` infers `dynamics_type` from weights (`dynamics.diffusion` → full) for Phase 1 `.pt` files.
+
+### Changed
+
+- `torch_model` defaults align with Phase 2; Phase 1 dense dynamics available via `--dynamics full`.
 
 ## [0.2.0] — 2026-03-25
 

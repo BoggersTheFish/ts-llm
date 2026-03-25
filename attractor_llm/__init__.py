@@ -30,6 +30,7 @@ try:
     from attractor_llm.embeddings import LearnableProtoEmbedder
     from attractor_llm.torch_core import (
         AttractorDynamics,
+        MultiHeadDynamics,
         converge_adaptive,
         converge_fixed_steps,
         text_to_signal as torch_text_to_signal,
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - optional until torch is installed
 else:
     __all__ += [
         "AttractorDynamics",
+        "MultiHeadDynamics",
         "torch_text_to_signal",
         "converge_adaptive",
         "converge_fixed_steps",

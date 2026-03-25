@@ -276,6 +276,15 @@ class AttractorDynamics(nn.Module):
     def center(self, state: torch.Tensor) -> torch.Tensor:
         return center(state)
 
+    def vector_field(self, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
+        r"""
+        Autonomous ODE right-hand side :math:`f(s,u) = A s + \alpha c(s)^{\odot 3} + u`
+        (same drift as one Euler step divided by :math:`\Delta t`).
+        """
+        c = center(state)
+        nonlinear = self.cubic_scale * (c**3)
+        return linear_diffusion(self.diffusion, state) + nonlinear + signal
+
     def forward(self, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
         """One Euler step; differentiable."""
         return step_state(state, self.diffusion, signal, self.dt, cubic_scale=self.cubic_scale)
@@ -353,3 +362,270 @@ class AttractorDynamics(nn.Module):
         if signals.ndim != 2:
             raise ValueError("embedder.get_all_signals must return (V, D)")
         return self.converge_fixed(signals, num_steps=num_steps, initial_state=None)
+
+
+class MultiHeadDynamics(nn.Module):
+    r"""
+    **Hierarchical multi-head attractor dynamics** with **low-rank** diffusion per head and
+    weak cross-head coupling.
+
+    The state is partitioned into :math:`H` heads of dimension :math:`D_h = D / H`. For each
+    head :math:`h`, the diffusion is
+
+    .. math::
+
+        A_h = U_h V_h + \operatorname{diag}(d_h),
+
+    with :math:`U_h \in \mathbb{R}^{D_h \times r}`, :math:`V_h \in \mathbb{R}^{r \times D_h}`.
+    One Euler step uses the same cubic nonlinearity as :class:`AttractorDynamics`, applied
+    per head, plus a small residual coupling that pulls heads toward their mean:
+
+    .. math::
+
+        \Delta s \leftarrow \Delta s + \gamma \left(\Delta s - \overline{\Delta s}^{\mathrm{heads}}\right).
+    """
+
+    def __init__(
+        self,
+        state_dim: int = 512,
+        num_heads: int = 4,
+        *,
+        head_dim: int | None = None,
+        rank: int = 64,
+        cubic_scale: float = 0.05,
+        dt: float = 0.05,
+        coupling: float = 0.01,
+        device: torch.device | None = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        super().__init__()
+        if device is None:
+            device = torch.device("cpu")
+        if head_dim is None:
+            if state_dim % num_heads != 0:
+                raise ValueError("state_dim must be divisible by num_heads")
+            head_dim = state_dim // num_heads
+        self.state_dim = state_dim
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.rank = rank
+        self.dt = dt
+
+        self.U = nn.Parameter(torch.randn(num_heads, head_dim, rank, device=device, dtype=dtype) * 0.01)
+        self.V = nn.Parameter(torch.randn(num_heads, rank, head_dim, device=device, dtype=dtype) * 0.01)
+        self.diag = nn.Parameter(
+            torch.linspace(-0.4, -0.1, head_dim, device=device, dtype=dtype).unsqueeze(0).expand(num_heads, -1).clone()
+        )
+        self.cubic_scale = nn.Parameter(torch.tensor(cubic_scale, device=device, dtype=dtype))
+        self.coupling = nn.Parameter(torch.tensor(coupling, device=device, dtype=dtype))
+        self.to(device=device, dtype=dtype)
+
+    def drift(self, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
+        """Right-hand side :math:`f(s,u)` with shape matching ``state``."""
+        squeeze = False
+        if state.ndim == 1:
+            state = state.unsqueeze(0)
+            signal = signal.unsqueeze(0)
+            squeeze = True
+        b, d = state.shape
+        if d != self.state_dim or signal.shape != state.shape:
+            raise ValueError("state and signal must match (B, D) or (D,)")
+
+        heads = state.view(b, self.num_heads, self.head_dim)
+        sig = signal.view(b, self.num_heads, self.head_dim)
+        drift_h = torch.zeros_like(heads)
+
+        for h in range(self.num_heads):
+            a_h = self.U[h] @ self.V[h] + torch.diag(self.diag[h])
+            c = heads[:, h] - heads[:, h].mean(dim=-1, keepdim=True)
+            nl = self.cubic_scale * (c**3)
+            drift_h[:, h] = torch.matmul(heads[:, h], a_h.T) + nl + sig[:, h]
+
+        mean_h = drift_h.mean(dim=1, keepdim=True)
+        drift_h = drift_h + self.coupling * (drift_h - mean_h)
+
+        out = drift_h.view(b, d)
+        return out.squeeze(0) if squeeze else out
+
+    def vector_field(self, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
+        """Same as :meth:`drift` — ODE right-hand side :math:`f(s,u)`."""
+        return self.drift(state, signal)
+
+    def forward(self, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
+        r"""One explicit Euler step :math:`s \leftarrow s + \Delta t\, f(s,u)`."""
+        return state + self.dt * self.drift(state, signal)
+
+    def converge_fixed(
+        self,
+        signal: torch.Tensor,
+        initial_state: torch.Tensor | None = None,
+        *,
+        num_steps: int = 20,
+        magnitude_floor: float = 1e-3,
+        magnitude_ceiling: float | None = 12.0,
+        target_norm: float | None = 1.0,
+    ) -> torch.Tensor:
+        """Fixed-step convergence; supports ``signal`` shape ``(D,)`` or ``(V, D)``."""
+        if signal.ndim == 2:
+            v, d = signal.shape
+            if d != self.state_dim:
+                raise ValueError("signal last dim must equal state_dim")
+            s = torch.zeros(v, d, device=signal.device, dtype=signal.dtype) if initial_state is None else initial_state.clone()
+            for _ in range(num_steps):
+                s_next = self.forward(s, signal)
+                s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+            return _apply_target_norm(s, d, target_norm)
+
+        dim = signal.shape[0]
+        s = torch.zeros(dim, device=signal.device, dtype=signal.dtype) if initial_state is None else initial_state.clone()
+        for _ in range(num_steps):
+            s_next = self.forward(s, signal)
+            s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+        return _apply_target_norm(s, dim, target_norm)
+
+    def precompute_attractors(
+        self,
+        embedder: LearnableProtoEmbedder,
+        num_steps: int = 16,
+    ) -> torch.Tensor:
+        """Same contract as :meth:`AttractorDynamics.precompute_attractors`."""
+        signals = embedder.get_all_signals()
+        if signals.ndim != 2:
+            raise ValueError("embedder.get_all_signals must return (V, D)")
+        return self.converge_fixed(signals, num_steps=num_steps, initial_state=None)
+
+
+def _vector_field_dispatch(dynamics: nn.Module, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
+    if isinstance(dynamics, MultiHeadDynamics):
+        return dynamics.drift(state, signal)
+    if isinstance(dynamics, AttractorDynamics):
+        return dynamics.vector_field(state, signal)
+    raise TypeError(f"Unsupported dynamics module: {type(dynamics)}")
+
+
+def neural_ode_converge(
+    dynamics: nn.Module,
+    signal: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    *,
+    num_steps: int,
+    dt: float,
+    ode_solver: str = "euler",
+    adaptive_ode: bool = False,
+    atol: float = 1e-4,
+    rtol: float = 1e-4,
+    magnitude_floor: float = 1e-3,
+    magnitude_ceiling: float | None = 12.0,
+    target_norm: float | None = 1.0,
+) -> torch.Tensor:
+    """
+    Integrate :math:`\\mathrm{d}s/\\mathrm{d}t = f(s,u)` with fixed hold :math:`u` using
+    :mod:`torchdiffeq` when ``ode_solver != "euler"`` or ``adaptive_ode``; otherwise
+    delegates to :meth:`AttractorDynamics.converge_fixed` / :meth:`MultiHeadDynamics.converge_fixed`
+    (manual Euler + clamp), preserving Phase~1 behavior.
+    """
+    if ode_solver == "euler" and not adaptive_ode:
+        return dynamics.converge_fixed(
+            signal,
+            initial_state=initial_state,
+            num_steps=num_steps,
+            magnitude_floor=magnitude_floor,
+            magnitude_ceiling=magnitude_ceiling,
+            target_norm=target_norm,
+        )
+
+    try:
+        from torchdiffeq import odeint
+    except ImportError as e:
+        raise ImportError("torchdiffeq is required for non-Euler ODE integration.") from e
+
+    dev = signal.device
+    dtype = signal.dtype
+    t_final = float(num_steps) * float(dt)
+
+    if signal.ndim == 1:
+        dim = int(signal.shape[0])
+        y0 = (
+            torch.zeros(dim, device=dev, dtype=dtype)
+            if initial_state is None
+            else initial_state.clone()
+        )
+    else:
+        v, d = signal.shape
+        dim = d
+        y0 = (
+            torch.zeros(v, d, device=dev, dtype=dtype)
+            if initial_state is None
+            else initial_state.clone()
+        )
+
+    def func(_t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return _vector_field_dispatch(dynamics, y, signal)
+
+    if adaptive_ode or ode_solver == "dopri5":
+        t_span = torch.tensor([0.0, t_final], device=dev, dtype=dtype)
+        traj = odeint(func, y0, t_span, method="dopri5", rtol=rtol, atol=atol)
+        y = traj[-1]
+    elif ode_solver == "rk4":
+        t_grid = torch.linspace(0.0, t_final, num_steps + 1, device=dev, dtype=dtype)
+        traj = odeint(
+            func,
+            y0,
+            t_grid,
+            method="rk4",
+            options={"step_size": float(dt)},
+        )
+        y = traj[-1]
+    else:
+        raise ValueError(
+            f"Unknown ode_solver {ode_solver!r}; use 'euler', 'rk4', or 'dopri5' (or set adaptive_ode)."
+        )
+
+    y = _clamp_norm(y, magnitude_floor, magnitude_ceiling)
+    return _apply_target_norm(y, dim, target_norm)
+
+
+class NeuralODEWrapper:
+    """
+    Lightweight façade holding ODE hyperparameters; delegates to :func:`neural_ode_converge`.
+    Does not own parameters (the dynamics module does).
+    """
+
+    def __init__(
+        self,
+        ode_solver: str = "euler",
+        adaptive_ode: bool = False,
+        atol: float = 1e-4,
+        rtol: float = 1e-4,
+    ) -> None:
+        self.ode_solver = ode_solver
+        self.adaptive_ode = adaptive_ode
+        self.atol = atol
+        self.rtol = rtol
+
+    def converge(
+        self,
+        dynamics: nn.Module,
+        signal: torch.Tensor,
+        initial_state: torch.Tensor | None,
+        *,
+        num_steps: int,
+        dt: float,
+        magnitude_floor: float = 1e-3,
+        magnitude_ceiling: float | None = 12.0,
+        target_norm: float | None = 1.0,
+    ) -> torch.Tensor:
+        return neural_ode_converge(
+            dynamics,
+            signal,
+            initial_state,
+            num_steps=num_steps,
+            dt=dt,
+            ode_solver=self.ode_solver,
+            adaptive_ode=self.adaptive_ode,
+            atol=self.atol,
+            rtol=self.rtol,
+            magnitude_floor=magnitude_floor,
+            magnitude_ceiling=magnitude_ceiling,
+            target_norm=target_norm,
+        )
