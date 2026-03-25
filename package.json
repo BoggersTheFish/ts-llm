@@ -1,0 +1,18 @@
+{
+  "name": "ts-llm",
+  "version": "0.1.0",
+  "description": "Dynamical language layer: proto-concept attractors without pretraining",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "dev": "tsc && node dist/cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
