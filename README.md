@@ -75,9 +75,10 @@ ts-llm/
 ├── run_attractor_llm.py
 ├── requirements.txt
 ├── package.json       # Optional future TypeScript tooling (no TS sources yet)
+├── LICENSE
 └── README.md
 ```
 
 ## License
 
-Add a `LICENSE` file if you want a specific terms; the repository is otherwise provided as-is for research and experimentation.
+This project is licensed under the [MIT License](LICENSE).

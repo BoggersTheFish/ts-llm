@@ -1,6 +1,7 @@
 {
   "name": "ts-llm",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Dynamical language layer: proto-concept attractors without pretraining",
   "type": "module",
   "main": "dist/index.js",
