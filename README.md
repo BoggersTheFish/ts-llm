@@ -1,83 +1,144 @@
 # ts-llm
 
-A **language reasoning substrate** built from **deterministic nonlinear attractor dynamics**. This is **not** a conventional large language model: there is **no pretraining**, **no learned embeddings**, and **no gradient descent**. Behavior comes from **state vectors**, **proto-concept signals** (deterministic maps from words or phrases to vectors), **nonlinear dynamics** (linear diffusion plus a cubic term on a centered state), and **distance-based selection** among candidate continuations.
+**Version 0.2.0** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+
+A **language reasoning substrate** built from **nonlinear attractor dynamics**. The repository contains:
+
+1. **Legacy NumPy toy** — deterministic hash signals, fixed diffusion, distance-based “generation” over a small word list (no learning).
+2. **Trainable PyTorch attractor LM (Phase 1 MVP)** — learnable embeddings, learnable dynamics, **negative-distance logits** to learned proto-attractors, and **tiktoken** subword tokenization.
 
 Repository: [github.com/BoggersTheFish/ts-llm](https://github.com/BoggersTheFish/ts-llm)
 
-## How it works
+---
 
-1. **Inject** a prompt: text is converted to a fixed **signal vector** (`text_to_signal`).
-2. **Converge** the internal state with a discrete update until the step change norm falls below a tolerance (default `1e-4`).
-3. **Proto-concepts** (vocabulary items) each have a precomputed **attractor** under the same dynamics with that signal held fixed.
-4. **Generation** scores candidates with **negative Euclidean distance** from the current state to each candidate’s attractor, injects the best match, re-converges, and repeats.
+## Core dynamics (shared idea)
 
-Optional behaviors include **beam lookahead**, **weighted simultaneous injection**, **sequential injection chains**, **multi-turn state persistence** (do not reset between calls), and **diagnostics** (per-step scores and distances).
+Let \(\mathbf{s}_t \in \mathbb{R}^D\) be the state, \(A \in \mathbb{R}^{D\times D}\) the diffusion operator, \(\alpha\) the cubic gain, and \(\mathbf{u}\) an injected signal. With \(c(\mathbf{s}) = \mathbf{s} - \bar{\mathbf{s}}\) (centered per vector in batch) one explicit Euler step is
+
+\[
+\mathbf{s}_{t+1} = \mathbf{s}_t + \Delta t \left( A \mathbf{s}_t + \alpha\, c(\mathbf{s}_t)^{\odot 3} + \mathbf{u} \right).
+\]
+
+**Trainable LM:** \(\mathbf{u}\) comes from a **learnable embedding** of the current token. **Proto-attractors** \(\mathbf{a}_v\) are the fixed-step flows from \(\mathbf{0}\) with each vocabulary signal held fixed. Next-token logits are
+
+\[
+\ell_v(\mathbf{s}) = -\frac{\|\mathbf{s} - \mathbf{a}_v\|_2}{\tau},
+\]
+
+with learnable temperature \(\tau > 0\). Training minimizes **cross-entropy** of these logits against the next token.
+
+---
 
 ## Requirements
 
 - Python 3.10+
-- [NumPy](https://numpy.org/) (see `requirements.txt`)
+- `pip install -r requirements.txt` → NumPy, PyTorch, **tiktoken**, torchdiffeq (optional for future Neural-ODE use)
 
-## Quick start
+---
+
+## Quick start (legacy NumPy toy)
 
 ```bash
-git clone https://github.com/BoggersTheFish/ts-llm.git
-cd ts-llm
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python run_attractor_llm.py "reason about time and change" --list-scores --max-tokens 12
 ```
 
-### CLI options (selection)
+Force the original toy path explicitly:
 
-| Flag | Meaning |
-|------|---------|
-| `--state-size` | State dimension (default 128) |
-| `--max-tokens` | Number of proto-concept steps to emit |
-| `--list-scores` | After prompt injection, print top candidate scores |
-| `--candidates` | Comma-separated subset of the vocabulary |
-| `--beam-width`, `--beam-depth` | Beam search for multi-step lookahead |
-| `--diagnostics` | Per-step scores and distances on stderr |
-| `--no-reset` | Keep internal state across invocations (multi-turn) |
-
-## Python API
-
-```python
-from attractor_llm import AttractorLanguageModel, GenerationConfig, GenerationResult
-
-cfg = GenerationConfig(
-    beam_width=3,
-    beam_depth=2,
-    target_norm=1.0,
-)
-m = AttractorLanguageModel(state_size=128, config=cfg)
-m.reset_state()
-m.inject_and_converge("Explain quantum entanglement")
-
-# Greedy or beam-driven generation with optional diagnostics
-out = m.generate(
-    "Explain quantum entanglement",
-    max_tokens=20,
-    return_diagnostics=True,
-)
-if isinstance(out, GenerationResult):
-    print(out.text)
-    print(out.scores, out.distances)
+```bash
+.venv/bin/python run_attractor_llm.py "reason about time" --legacy
 ```
 
-Core dynamics live in `attractor_llm/core.py`; the model, vocabulary, and generation loop are in `attractor_llm/model.py`.
+---
+
+## Trainable attractor LM (Phase 1 MVP)
+
+### Tokenization
+
+- Default: **tiktoken** GPT-2 BPE (`encoding=gpt2`). Token ids are restricted to \([0, n)\) with **`--vocab-cap`** (default **8192**) so the embedding table size stays manageable; ids \(\ge n\) are skipped during encoding (no giant downloads).
+- **`--no-tiktoken`**: fall back to the original **word-list** tokenizer over `DEFAULT_VOCAB` (toy, offline).
+
+### Training (no dataset download required)
+
+```bash
+mkdir -p data checkpoints
+# optional: put UTF-8 text in data/train.txt
+.venv/bin/python run_attractor_llm.py --mode train --epochs 5 --lr 0.01 --eval-every 1 --seq-len 16 --grad-clip 1.0
+```
+
+Or:
+
+```bash
+.venv/bin/python train.py --epochs 3 --lr 0.005 --no-tiktoken   # word tokenizer only
+```
+
+Checkpoints are written under **`checkpoints/`** (see `.gitignore`).
+
+### Generation (PyTorch checkpoint)
+
+```bash
+.venv/bin/python run_attractor_llm.py "hello world" --checkpoint checkpoints/attractor_llm_final.pt --max-tokens 20
+```
+
+### CLI reference (selection)
+
+| Flag | Role |
+|------|------|
+| `--mode generate` \| `train` | Default: `generate` |
+| `--legacy` | Force **NumPy** toy; ignores `--checkpoint` for generation |
+| `--checkpoint` | `.pt` file: torch **generate** or **resume train** |
+| `--state-dim` | Torch state dimension \(D\) |
+| `--encoding` | tiktoken encoding name (default `gpt2`) |
+| `--vocab-cap` | Max token id + 1 for embedding / logits |
+| `--no-tiktoken` | Word-list tokenizer |
+| `--eval-every` | Run `evaluate()` every *N* epochs (0 = off) |
+| `--eval-data-file` | Optional eval text (defaults to synthetic if missing) |
+| `--grad-clip` | Global L2 clip (0 disables) |
+| `--state-size`, `--beam-*`, `--list-scores`, … | **Legacy NumPy** only |
+
+---
+
+## Python API (PyTorch)
+
+```python
+from attractor_llm.tokenizer import AttractorTokenizer
+from attractor_llm.torch_model import TorchAttractorLanguageModel
+
+tok = AttractorTokenizer(encoding_name="gpt2", vocab_cap=4096)
+m = TorchAttractorLanguageModel(state_dim=256, tokenizer=tok).cuda()
+# training_step(input_ids_1d, target_ids_1d), evaluate(loader, device), generate(prompt)
+```
+
+Legacy NumPy API remains in `attractor_llm.model.AttractorLanguageModel` and `attractor_llm.core`.
+
+---
 
 ## Project layout
 
 ```
 ts-llm/
-├── attractor_llm/     # Package: dynamics + model
+├── attractor_llm/
+│   ├── core.py           # NumPy dynamics (legacy)
+│   ├── torch_core.py     # PyTorch dynamics + batched attractors
+│   ├── embeddings.py     # LearnableProtoEmbedder
+│   ├── tokenizer.py      # tiktoken + word fallback
+│   ├── torch_model.py    # TorchAttractorLanguageModel
+│   ├── training.py       # Dataset, checkpoints, train_epoch
+│   └── model.py          # NumPy toy + DEFAULT_VOCAB
 ├── run_attractor_llm.py
+├── train.py
 ├── requirements.txt
-├── package.json       # Optional future TypeScript tooling (no TS sources yet)
+├── CHANGELOG.md
 ├── LICENSE
 └── README.md
 ```
+
+---
+
+## Changelog
+
+Release notes and version history: [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

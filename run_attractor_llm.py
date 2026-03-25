@@ -1,30 +1,18 @@
 #!/usr/bin/env python3
-"""CLI: inject prompt → converge → iterate proto-concept selection."""
+"""CLI: legacy NumPy generation (default) or PyTorch training / torch generation with ``--checkpoint``."""
 
 from __future__ import annotations
 
 import argparse
+import math
 import sys
+from pathlib import Path
 
 from attractor_llm import AttractorLanguageModel, GenerationResult
 from attractor_llm.model import GenerationConfig
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description="Attractor dynamics language layer (demo)")
-    p.add_argument("prompt", nargs="?", default="reason about time and change", help="Input prompt")
-    p.add_argument("--state-size", type=int, default=128)
-    p.add_argument("--max-tokens", type=int, default=16)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--no-reset", action="store_true", help="Keep state across runs (multi-turn)")
-    p.add_argument("--candidates", type=str, default="", help="Comma-separated subset of vocabulary")
-    p.add_argument("--list-scores", action="store_true", help="Print top candidate scores after prompt")
-    p.add_argument("--top-k", type=int, default=8)
-    p.add_argument("--beam-width", type=int, default=1, help="Beam size for lookahead (>1 enables beam)")
-    p.add_argument("--beam-depth", type=int, default=1, help="Steps of lookahead (>=1)")
-    p.add_argument("--diagnostics", action="store_true", help="Print per-step scores and distances to stderr")
-    args = p.parse_args()
-
+def _run_legacy_generate(args: argparse.Namespace) -> None:
     cfg = GenerationConfig(beam_width=args.beam_width, beam_depth=args.beam_depth)
     model = AttractorLanguageModel(state_size=args.state_size, seed=args.seed, config=cfg)
     cand = None
@@ -56,6 +44,161 @@ def main() -> None:
                 print(f"step {i + 1}: {w!r}  score={sc:.6f}  dist={dist:.6f}", file=sys.stderr)
     else:
         print(gen)
+
+
+def _run_train(args: argparse.Namespace) -> None:
+    import torch
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+
+    from attractor_llm.tokenizer import AttractorTokenizer
+    from attractor_llm.torch_model import TorchAttractorLanguageModel
+    from attractor_llm.training import load_checkpoint, save_checkpoint, train_epoch, TextDataset
+
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+
+    tokenizer = AttractorTokenizer(
+        encoding_name=args.encoding,
+        vocab_cap=args.vocab_cap,
+        use_tiktoken=not args.no_tiktoken,
+    )
+
+    data_path = Path(args.data_file)
+    train_ds = TextDataset(data_path if data_path.exists() else None, tokenizer=tokenizer, seq_len=args.seq_len)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=False,
+    )
+
+    eval_path = Path(args.eval_data_file) if args.eval_data_file else None
+    if args.eval_every and eval_path and eval_path.exists():
+        eval_ds = TextDataset(eval_path, tokenizer=tokenizer, seq_len=args.seq_len)
+    else:
+        eval_ds = TextDataset(None, tokenizer=tokenizer, seq_len=args.seq_len)
+    eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False, drop_last=False)
+
+    model: TorchAttractorLanguageModel
+    optimizer: optim.Optimizer
+    if args.checkpoint and Path(args.checkpoint).exists():
+        model, ckpt = load_checkpoint(args.checkpoint, device=device)
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        if ckpt.get("optimizer_state") is not None:
+            try:
+                optimizer.load_state_dict(ckpt["optimizer_state"])
+            except (TypeError, ValueError):
+                pass
+    else:
+        model = TorchAttractorLanguageModel(state_dim=args.state_dim, tokenizer=tokenizer).to(device)
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    out_dir = Path(args.checkpoint_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(args.epochs):
+        loss = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            max_grad_norm=args.grad_clip if args.grad_clip > 0 else None,
+        )
+        print(f"Epoch {epoch + 1:02d} | train_loss: {loss:.4f}")
+        if args.eval_every and (epoch + 1) % args.eval_every == 0:
+            val_loss = model.evaluate(eval_loader, device)
+            ppl = math.exp(val_loss) if val_loss < 20 else float("inf")
+            print(f"  eval_loss: {val_loss:.4f}  perplexity: {ppl:.2f}")
+        if (epoch + 1) % max(args.save_every, 1) == 0:
+            ckpt_path = out_dir / f"attractor_llm_epoch_{epoch + 1}.pt"
+            save_checkpoint(model, ckpt_path, optimizer)
+
+    final_path = out_dir / "attractor_llm_final.pt"
+    save_checkpoint(model, final_path, optimizer)
+    print("Training complete.")
+
+
+def _run_torch_generate(args: argparse.Namespace) -> None:
+    import torch
+
+    from attractor_llm.torch_model import TorchAttractorLanguageModel
+
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if not args.checkpoint or not Path(args.checkpoint).exists():
+        print("Error: --checkpoint path to a saved .pt file is required for torch generation.", file=sys.stderr)
+        sys.exit(1)
+    model = TorchAttractorLanguageModel.load(args.checkpoint, device=device)
+    text = model.generate(args.prompt, max_tokens=args.max_tokens)
+    print(text)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="ts-llm – attractor LLM: NumPy toy (default) or PyTorch training / torch inference.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "prompt",
+        nargs="?",
+        default="reason about time and change",
+        help="Input prompt (generate mode)",
+    )
+    p.add_argument("--mode", choices=["generate", "train"], default="generate", help="generate = default CLI")
+
+    p.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Force original NumPy toy generation (ignores --checkpoint for generation)",
+    )
+    p.add_argument("--checkpoint", type=str, default=None, help="Torch .pt for train resume or torch generation")
+    p.add_argument("--state-dim", type=int, default=128, help="Torch model state dimension D")
+    p.add_argument("--device", type=str, default=None, help="cpu | cuda (default: auto)")
+    p.add_argument("--max-tokens", type=int, default=16)
+
+    p.add_argument("--epochs", type=int, default=5)
+    p.add_argument("--lr", type=float, default=0.01)
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--data-file", type=str, default="data/train.txt")
+    p.add_argument("--eval-data-file", type=str, default="data/eval.txt", help="Optional eval text (defaults to synthetic if missing)")
+    p.add_argument("--seq-len", type=int, default=8, help="Sliding window length")
+    p.add_argument("--save-every", type=int, default=2, help="Save checkpoint every N epochs (train)")
+    p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+    p.add_argument("--eval-every", type=int, default=0, help="Run evaluation every N epochs (0 = disabled)")
+    p.add_argument("--grad-clip", type=float, default=1.0, help="Global L2 grad clip (0 = off)")
+
+    p.add_argument("--encoding", type=str, default="gpt2", help="tiktoken encoding name")
+    p.add_argument("--vocab-cap", type=int, default=8192, help="Max embedding / logits width (tiktoken)")
+    p.add_argument("--no-tiktoken", action="store_true", help="Use word-list tokenizer (toy vocab)")
+
+    p.add_argument("--state-size", type=int, default=128, help="(Legacy NumPy) state dimension")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--no-reset", action="store_true")
+    p.add_argument("--candidates", type=str, default="")
+    p.add_argument("--list-scores", action="store_true")
+    p.add_argument("--top-k", type=int, default=8)
+    p.add_argument("--beam-width", type=int, default=1)
+    p.add_argument("--beam-depth", type=int, default=1)
+    p.add_argument("--diagnostics", action="store_true")
+
+    args = p.parse_args()
+
+    if args.mode == "train":
+        _run_train(args)
+        return
+
+    if args.checkpoint and not Path(args.checkpoint).exists():
+        print(f"Error: checkpoint not found: {args.checkpoint}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.legacy and args.checkpoint:
+        print("Note: --legacy ignores --checkpoint; using NumPy toy generation.", file=sys.stderr)
+
+    use_torch = args.checkpoint is not None and Path(args.checkpoint).exists()
+    if use_torch and not args.legacy:
+        _run_torch_generate(args)
+        return
+
+    _run_legacy_generate(args)
 
 
 if __name__ == "__main__":
