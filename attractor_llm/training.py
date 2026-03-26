@@ -20,10 +20,12 @@ class TextDataset(Dataset):
             self.ids = self.tokenizer.encode(text)
         else:
             self.ids = list(range(5)) * 1000
-        self.ids = self.ids[: len(self.ids) - self.seq_len]
+        # Keep full token stream; sliding windows are formed in __getitem__.
+        if len(self.ids) < self.seq_len + 1:
+            self.ids = self.ids + [0] * (self.seq_len + 1 - len(self.ids))
 
     def __len__(self):
-        return len(self.ids) - self.seq_len
+        return max(0, len(self.ids) - self.seq_len)
 
     def __getitem__(self, idx: int) -> Tuple[List[int], List[int]]:
         x = self.ids[idx : idx + self.seq_len]
@@ -38,6 +40,7 @@ def save_checkpoint(model: TorchAttractorLanguageModel, path: str | Path, optimi
         "model_state": model.state_dict(),
         "vocab": model.vocab,
         "state_dim": model.state_dim,
+        "config": model.config_dict(),
         "optimizer_state": optimizer.state_dict() if optimizer else None,
     }
     torch.save(state, path)
@@ -49,7 +52,41 @@ def load_checkpoint(checkpoint_path: str | Path, device: torch.device = torch.de
     cfg = ckpt.get("config") or {}
     state_dim = int(ckpt.get("state_dim", cfg.get("state_dim", 512)))
     vocab = ckpt.get("vocab", cfg.get("vocab"))
-    model = TorchAttractorLanguageModel(state_dim=state_dim, vocab=vocab)
+
+    tokenizer = None
+    tok_cfg = cfg.get("tokenizer_config")
+    if isinstance(tok_cfg, dict):
+        tokenizer = AttractorTokenizer(
+            encoding_name=str(tok_cfg.get("encoding_name", "gpt2")),
+            vocab_cap=int(tok_cfg.get("n_vocab", 8192)),
+            use_tiktoken=bool(tok_cfg.get("use_tiktoken", True)),
+        )
+    elif not vocab:
+        # Backward-compatible fallback for checkpoints that predate config serialization.
+        tokenizer = AttractorTokenizer(use_tiktoken=False)
+
+    model = TorchAttractorLanguageModel(
+        state_dim=state_dim,
+        vocab=vocab,
+        tokenizer=tokenizer,
+        dynamics_type=cfg.get("dynamics_type"),
+        cubic_scale=float(cfg.get("cubic_scale", 0.05)),
+        dt=float(cfg.get("dt", 0.05)),
+        num_heads=int(cfg.get("num_heads", 4)),
+        rank=int(cfg.get("rank", 64)) if cfg.get("rank") is not None else 64,
+        coupling=float(cfg.get("coupling")) if cfg.get("coupling") is not None else 0.01,
+        ode_solver=str(cfg.get("ode_solver", "euler")),
+        adaptive_ode=bool(cfg.get("adaptive_ode", False)),
+        ode_atol=float(cfg.get("ode_atol", 1e-4)),
+        ode_rtol=float(cfg.get("ode_rtol", 1e-4)),
+        num_attractor_steps=int(cfg.get("num_attractor_steps", 16)),
+        num_converge_steps=int(cfg.get("num_converge_steps", 12)),
+        hierarchy_levels=int(cfg.get("hierarchy_levels", 1)),
+        timescale_ratio=float(cfg.get("timescale_ratio", 4.0)),
+        phrase_vocab_size=int(cfg.get("phrase_vocab_size", 8192)),
+        phrase_span=int(cfg.get("phrase_span", 4)),
+        phrase_attractors=bool(cfg.get("phrase_attractors", True)),
+    )
     model.load_state_dict(ckpt.get("model_state", ckpt), strict=False)
     model.to(device)
     return model, {"optimizer_state": ckpt.get("optimizer_state")}
@@ -61,11 +98,35 @@ def train_epoch(
     optimizer: optim.Optimizer,
     device: torch.device,
     max_grad_norm: float | None = 1.0,
+    *,
+    progress: bool = False,
+    epoch: int = 0,
+    total_epochs: int = 1,
 ):
     """Train one epoch; supports list/tensor batches and optional grad clipping."""
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None  # type: ignore[misc, assignment]
+
     model.train()
     total_loss = 0.0
-    for batch in loader:
+    iterator = loader
+    if progress and tqdm is not None and len(loader) > 0:
+        iterator = tqdm(
+            loader,
+            desc=f"Epoch {epoch + 1}/{total_epochs}",
+            unit="batch",
+            leave=True,
+        )
+    elif progress and tqdm is None:
+        print(
+            f"[train] epoch {epoch + 1}/{total_epochs}: {len(loader)} batches (install tqdm for a progress bar)",
+            flush=True,
+        )
+
+    n_batches = 0
+    for batch in iterator:
         input_ids, target_ids = batch
 
         optimizer.zero_grad()
@@ -77,4 +138,5 @@ def train_epoch(
 
         optimizer.step()
         total_loss += loss.item()
-    return total_loss / len(loader)
+        n_batches += 1
+    return total_loss / max(n_batches, 1)

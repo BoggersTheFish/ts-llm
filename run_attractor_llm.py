@@ -138,6 +138,12 @@ def _run_train(args: argparse.Namespace) -> None:
         drop_last=False,
     )
 
+    print(
+        f"Train: {len(train_ds)} windows | {len(train_loader)} batches/epoch | "
+        f"{args.epochs} epoch(s) | device={device}",
+        flush=True,
+    )
+
     model: TorchAttractorLanguageModel
     optimizer: optim.Optimizer
     if args.dynamics == "multihead" and args.state_dim % args.heads != 0:
@@ -196,6 +202,9 @@ def _run_train(args: argparse.Namespace) -> None:
             optimizer,
             device,
             max_grad_norm=args.grad_clip if args.grad_clip > 0 else None,
+            progress=args.train_progress,
+            epoch=epoch,
+            total_epochs=args.epochs,
         )
         print(f"Epoch {epoch + 1:02d} | train_loss: {loss:.4f}")
         if args.eval_every and (epoch + 1) % args.eval_every == 0 and val_loader is not None:
@@ -331,6 +340,12 @@ def main() -> None:
     p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     p.add_argument("--eval-every", type=int, default=0, help="Run evaluation every N epochs (0 = disabled)")
     p.add_argument("--grad-clip", type=float, default=1.0, help="Global L2 grad clip (0 = off)")
+    p.add_argument(
+        "--train-progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show per-batch tqdm progress during training (default: on; use --no-train-progress to disable)",
+    )
 
     p.add_argument("--encoding", type=str, default="gpt2", help="tiktoken encoding name")
     p.add_argument("--vocab-cap", type=int, default=8192, help="Max embedding / logits width (tiktoken)")

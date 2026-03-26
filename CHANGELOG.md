@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Phase 3: self-improvement loop, constraint graphs.
 
+### Added
+
+- Training mode prints dataset summary (windows, batches/epoch, device) and optional per-batch tqdm progress (`--train-progress` default on; `--no-train-progress` to disable).
+
 ### Fixed
 
 - Training loop now handles TinyStories/DataLoader batch collation robustly (tensor and list-backed batches) without `.ndim` / `.tolist()` type mismatches.

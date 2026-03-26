@@ -138,6 +138,7 @@ Checkpoints are written under **`checkpoints/`** (see `.gitignore`).
 | `--tinystories-max-files` | Optional cap on TinyStories `.txt` files loaded |
 | `--eval-data-file` | Optional eval text when `--val-split` is 0 (defaults to synthetic if missing) |
 | `--grad-clip` | Global L2 clip (0 disables) |
+| `--train-progress` / `--no-train-progress` | Per-batch tqdm bar during training (default: on; useful on slow CPUs) |
 | `--state-size`, `--beam-*`, `--list-scores`, … | **Legacy NumPy** only |
 
 ---
