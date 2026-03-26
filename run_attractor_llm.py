@@ -80,6 +80,8 @@ def _run_train(args: argparse.Namespace) -> None:
             tokenizer=tokenizer,
             seq_len=args.seq_len,
             max_files=args.tinystories_max_files,
+            max_tokens=args.tinystories_max_tokens,
+            max_windows=args.tinystories_max_windows,
         )
         val_ds = TinyStoriesDataset(
             split="val",
@@ -87,6 +89,8 @@ def _run_train(args: argparse.Namespace) -> None:
             tokenizer=tokenizer,
             seq_len=args.seq_len,
             max_files=args.tinystories_max_files,
+            max_tokens=args.tinystories_max_tokens,
+            max_windows=args.tinystories_max_windows,
         )
         if len(val_ds) > 0:
             val_loader = DataLoader(
@@ -333,7 +337,19 @@ def main() -> None:
         "--tinystories-max-files",
         type=int,
         default=None,
-        help="Optional cap on TinyStories .txt files to load (smaller / faster experiments)",
+        help="Optional cap on TinyStories JSON shard files to load (smaller / faster experiments)",
+    )
+    p.add_argument(
+        "--tinystories-max-tokens",
+        type=int,
+        default=500_000,
+        help="Max tokens to load from TinyStories after encoding (0 = full corpus; default 500k for practical CPU training)",
+    )
+    p.add_argument(
+        "--tinystories-max-windows",
+        type=int,
+        default=2048,
+        help="Max sliding windows per split after train/val partition (0 = unlimited). Default 2048 keeps one epoch bounded on CPU",
     )
     p.add_argument("--seq-len", type=int, default=8, help="Sliding window length")
     p.add_argument("--save-every", type=int, default=2, help="Save checkpoint every N epochs (train)")

@@ -87,7 +87,11 @@ Use `--dataset tinystories` to train on [TinyStories](https://huggingface.co/dat
   --state-dim 512 --seq-len 128 --ode-solver rk4 --eval-every 1
 ```
 
-Pass `--tinystories-max-files N` to load only the first `N` story files (smaller experiments). For TinyStories, set a non-zero `--val-split` (e.g. `0.1`) so the validation loader is non-empty.
+Pass `--tinystories-max-files N` to load only the first `N` JSON shard files (each shard can still contain a huge number of stories).
+
+**CPU-friendly defaults:** `--tinystories-max-tokens` (default **500000**) caps how many tokens are read from disk, and `--tinystories-max-windows` (default **2048**) caps how many training steps one epoch takes (each window is one batch with `--batch-size 1`). Use `--tinystories-max-tokens 0` and `--tinystories-max-windows 0` only if you intentionally want the full corpus (very slow on CPU).
+
+For TinyStories, set a non-zero `--val-split` (e.g. `0.1`) so the validation loader is non-empty.
 
 Recent training-loop robustness updates:
 - `train_epoch` and `evaluate` now accept both tensor batches and Python-list batches from `DataLoader`.
@@ -135,7 +139,9 @@ Checkpoints are written under **`checkpoints/`** (see `.gitignore`).
 | `--eval-every` | Run `evaluate()` every *N* epochs (0 = off) |
 | `--dataset` | `custom` (default) or `tinystories` (download after confirm) |
 | `--val-split` | Fraction of tokens for validation (`0` = off; use e.g. `0.1` with TinyStories) |
-| `--tinystories-max-files` | Optional cap on TinyStories `.txt` files loaded |
+| `--tinystories-max-files` | Optional cap on TinyStories JSON shard files loaded |
+| `--tinystories-max-tokens` | Max tokens to load (0 = unlimited; default 500000) |
+| `--tinystories-max-windows` | Max sliding windows per train/val split per epoch (0 = unlimited; default 2048) |
 | `--eval-data-file` | Optional eval text when `--val-split` is 0 (defaults to synthetic if missing) |
 | `--grad-clip` | Global L2 clip (0 disables) |
 | `--train-progress` / `--no-train-progress` | Per-batch tqdm bar during training (default: on; useful on slow CPUs) |
