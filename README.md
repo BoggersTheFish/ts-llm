@@ -93,6 +93,8 @@ Recent training-loop robustness updates:
 - `train_epoch` and `evaluate` now accept both tensor batches and Python-list batches from `DataLoader`.
 - `training_step` accepts either sequence shape `(L,)` or batched shape `(B, L)` and also handles TinyStories' collated `list[tensor(B)]` layout.
 - `load_checkpoint` is more tolerant of older checkpoint schemas (missing config keys / partial state dicts).
+- `TextDataset` now handles short custom corpora safely (non-negative `__len__` and minimal padding).
+- Checkpoint restore now preserves tokenizer config and safely defaults optional numeric fields when old checkpoints store `null`.
 
 With `--val-split` > 0 on **custom** data, validation is taken from the same `--data-file` stream; `--eval-data-file` is not used in that mode.
 

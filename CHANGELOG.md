@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Training loop now handles TinyStories/DataLoader batch collation robustly (tensor and list-backed batches) without `.ndim` / `.tolist()` type mismatches.
 - `TorchAttractorLanguageModel.training_step` now supports both `(L,)` and `(B, L)` token layouts, including TinyStories' collated `list[tensor(B)]` shape.
 - Checkpoint loading is more backward-compatible when older checkpoints are missing newer config fields.
+- `TextDataset` no longer returns negative length on very short custom text; tiny corpora are padded to minimum sliding-window size.
+- Checkpoint loading now restores tokenizer config when available and safely handles optional numeric config fields stored as `null`.
 
 ## [0.5.0] — 2026-03-25
 
