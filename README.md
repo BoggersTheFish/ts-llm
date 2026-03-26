@@ -89,6 +89,11 @@ Use `--dataset tinystories` to train on [TinyStories](https://huggingface.co/dat
 
 Pass `--tinystories-max-files N` to load only the first `N` story files (smaller experiments). For TinyStories, set a non-zero `--val-split` (e.g. `0.1`) so the validation loader is non-empty.
 
+Recent training-loop robustness updates:
+- `train_epoch` and `evaluate` now accept both tensor batches and Python-list batches from `DataLoader`.
+- `training_step` accepts either sequence shape `(L,)` or batched shape `(B, L)` and also handles TinyStories' collated `list[tensor(B)]` layout.
+- `load_checkpoint` is more tolerant of older checkpoint schemas (missing config keys / partial state dicts).
+
 With `--val-split` > 0 on **custom** data, validation is taken from the same `--data-file` stream; `--eval-data-file` is not used in that mode.
 
 **Alternative entrypoint** (`train.py` forwards to the same CLI):

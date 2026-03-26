@@ -156,6 +156,19 @@ class TorchAttractorLanguageModel(nn.Module):
     def _tau(self) -> torch.Tensor:
         return self.temperature.clamp(min=1e-6)
 
+    @staticmethod
+    def _coerce_token_ids(ids: torch.Tensor | list, device: torch.device) -> torch.Tensor:
+        """Accept plain tensors, list[int], list[list[int]], or collated list[tensor(batch)]."""
+        if isinstance(ids, torch.Tensor):
+            return ids.to(device=device, dtype=torch.long)
+        if isinstance(ids, list) and ids:
+            first = ids[0]
+            if isinstance(first, torch.Tensor):
+                # DataLoader may collate sequence lists into [L] list of [B] tensors.
+                stacked = torch.stack([t.to(device=device, dtype=torch.long) for t in ids], dim=1)
+                return stacked
+        return torch.as_tensor(ids, dtype=torch.long, device=device)
+
     def _dynamics_dt(self) -> float:
         if isinstance(self.dynamics, MultiTimescaleMultiHeadDynamics):
             return float(self.dynamics.fast.dt)
@@ -242,12 +255,29 @@ class TorchAttractorLanguageModel(nn.Module):
         input_ids, target_ids :
             1D tensors of length ``L`` on the same device as parameters.
         """
-        if input_ids.ndim != 1 or target_ids.ndim != 1:
-            raise ValueError("training_step expects 1D input_ids and target_ids")
-        if input_ids.shape[0] != target_ids.shape[0]:
-            raise ValueError("input_ids and target_ids must have the same length")
+        # Attractor philosophy: deterministic recurrence in continuous state space,
+        # with next-token logits computed from distances to proto-attractors.
+        device = next(self.parameters()).device
+        input_ids = self._coerce_token_ids(input_ids, device)
+        target_ids = self._coerce_token_ids(target_ids, device)
 
-        device = input_ids.device
+        if input_ids.shape != target_ids.shape:
+            raise ValueError("input_ids and target_ids must have identical shape")
+        if input_ids.ndim not in (1, 2):
+            raise ValueError("training_step expects 1D or 2D tensors (seq or batch,seq)")
+
+        if input_ids.ndim == 2:
+            bsz = int(input_ids.shape[0])
+            acc = torch.zeros((), device=device)
+            for b in range(bsz):
+                acc = acc + self.training_step(
+                    input_ids[b],
+                    target_ids[b],
+                    num_converge_steps=num_converge_steps,
+                    num_attractor_steps=num_attractor_steps,
+                )
+            return acc / max(bsz, 1)
+
         L = int(input_ids.shape[0])
         nc = num_converge_steps if num_converge_steps is not None else self.num_converge_steps
         na = num_attractor_steps if num_attractor_steps is not None else self.num_attractor_steps
@@ -277,16 +307,7 @@ class TorchAttractorLanguageModel(nn.Module):
         n = 0
         with torch.no_grad():
             for input_ids, target_ids in loader:
-                input_ids = input_ids.to(device)
-                target_ids = target_ids.to(device)
-                if input_ids.ndim == 1:
-                    loss = self.training_step(input_ids, target_ids)
-                else:
-                    bsz = input_ids.shape[0]
-                    acc = torch.zeros((), device=device)
-                    for b in range(bsz):
-                        acc = acc + self.training_step(input_ids[b], target_ids[b])
-                    loss = acc / max(bsz, 1)
+                loss = self.training_step(input_ids, target_ids)
                 total += float(loss.item())
                 n += 1
         return total / max(n, 1)

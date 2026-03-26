@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Phase 3: self-improvement loop, constraint graphs.
 
+### Fixed
+
+- Training loop now handles TinyStories/DataLoader batch collation robustly (tensor and list-backed batches) without `.ndim` / `.tolist()` type mismatches.
+- `TorchAttractorLanguageModel.training_step` now supports both `(L,)` and `(B, L)` token layouts, including TinyStories' collated `list[tensor(B)]` shape.
+- Checkpoint loading is more backward-compatible when older checkpoints are missing newer config fields.
+
 ## [0.5.0] — 2026-03-25
 
 ### Added
