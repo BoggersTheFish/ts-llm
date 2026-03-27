@@ -7,19 +7,34 @@ from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 from pathlib import Path
 from typing import Tuple, List
+from time import perf_counter
 from .torch_model import TorchAttractorLanguageModel
 from .tokenizer import AttractorTokenizer
 
 
 class TextDataset(Dataset):
-    def __init__(self, text_file: str | Path | None = None, tokenizer: AttractorTokenizer | None = None, seq_len: int = 16):
+    def __init__(
+        self,
+        text_file: str | Path | None = None,
+        tokenizer: AttractorTokenizer | None = None,
+        seq_len: int = 16,
+        split: str = "train",
+        val_split: float = 0.0,
+    ):
         self.tokenizer = tokenizer or AttractorTokenizer()
         self.seq_len = seq_len
+        if split not in ("train", "val"):
+            raise ValueError("split must be 'train' or 'val'")
+        if not 0.0 <= val_split < 1.0:
+            raise ValueError("val_split must be in [0, 1)")
         if text_file and Path(text_file).exists():
             text = Path(text_file).read_text(encoding="utf-8")
             self.ids = self.tokenizer.encode(text)
         else:
             self.ids = list(range(5)) * 1000
+        if val_split > 0.0:
+            split_idx = int(len(self.ids) * (1.0 - val_split))
+            self.ids = self.ids[:split_idx] if split == "train" else self.ids[split_idx:]
         # Keep full token stream; sliding windows are formed in __getitem__.
         if len(self.ids) < self.seq_len + 1:
             self.ids = self.ids + [0] * (self.seq_len + 1 - len(self.ids))
@@ -102,6 +117,7 @@ def train_epoch(
     progress: bool = False,
     epoch: int = 0,
     total_epochs: int = 1,
+    log_every_batches: int = 0,
 ):
     """Train one epoch; supports list/tensor batches and optional grad clipping."""
     try:
@@ -126,6 +142,9 @@ def train_epoch(
         )
 
     n_batches = 0
+    epoch_start = perf_counter()
+    window_start = epoch_start
+    window_batches = 0
     for batch in iterator:
         input_ids, target_ids = batch
 
@@ -139,4 +158,23 @@ def train_epoch(
         optimizer.step()
         total_loss += loss.item()
         n_batches += 1
+        window_batches += 1
+
+        if log_every_batches > 0 and n_batches % log_every_batches == 0:
+            now = perf_counter()
+            elapsed = max(now - window_start, 1e-9)
+            overall = max(now - epoch_start, 1e-9)
+            bps = window_batches / elapsed
+            avg_bps = n_batches / overall
+            msg = (
+                f"[train] epoch {epoch + 1}/{total_epochs} "
+                f"batch {n_batches}/{len(loader)} "
+                f"loss={loss.item():.4f} bps={bps:.2f} avg_bps={avg_bps:.2f}"
+            )
+            if progress and tqdm is not None:
+                tqdm.write(msg)
+            else:
+                print(msg, flush=True)
+            window_start = now
+            window_batches = 0
     return total_loss / max(n_batches, 1)

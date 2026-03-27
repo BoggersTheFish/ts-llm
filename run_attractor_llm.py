@@ -47,6 +47,7 @@ def _run_legacy_generate(args: argparse.Namespace) -> None:
 
 
 def _run_train(args: argparse.Namespace) -> None:
+    import random
     import torch
     import torch.optim as optim
     from torch.utils.data import DataLoader
@@ -55,7 +56,16 @@ def _run_train(args: argparse.Namespace) -> None:
     from attractor_llm.torch_model import TorchAttractorLanguageModel
     from attractor_llm.training import load_checkpoint, save_checkpoint, train_epoch, TextDataset
 
+    random.seed(args.seed)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
     tokenizer = AttractorTokenizer(
         encoding_name=args.encoding,
@@ -144,7 +154,7 @@ def _run_train(args: argparse.Namespace) -> None:
 
     print(
         f"Train: {len(train_ds)} windows | {len(train_loader)} batches/epoch | "
-        f"{args.epochs} epoch(s) | device={device}",
+        f"{args.epochs} epoch(s) | device={device} | seed={args.seed}",
         flush=True,
     )
 
@@ -209,6 +219,7 @@ def _run_train(args: argparse.Namespace) -> None:
             progress=args.train_progress,
             epoch=epoch,
             total_epochs=args.epochs,
+            log_every_batches=args.log_every_batches,
         )
         print(f"Epoch {epoch + 1:02d} | train_loss: {loss:.4f}")
         if args.eval_every and (epoch + 1) % args.eval_every == 0 and val_loader is not None:
@@ -222,6 +233,130 @@ def _run_train(args: argparse.Namespace) -> None:
     final_path = out_dir / "attractor_llm_final.pt"
     save_checkpoint(model, final_path, optimizer)
     print("Training complete.")
+
+
+def _run_benchmark(args: argparse.Namespace) -> None:
+    import random
+    from itertools import cycle
+    from time import perf_counter
+
+    import torch
+    import torch.optim as optim
+    from torch.utils.data import DataLoader
+
+    from attractor_llm.tokenizer import AttractorTokenizer
+    from attractor_llm.torch_model import TorchAttractorLanguageModel
+    from attractor_llm.training import TextDataset
+
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    tokenizer = AttractorTokenizer(
+        encoding_name=args.encoding,
+        vocab_cap=args.vocab_cap,
+        use_tiktoken=not args.no_tiktoken,
+    )
+
+    if args.dataset == "tinystories":
+        from attractor_llm.datasets import TinyStoriesDataset
+
+        train_ds = TinyStoriesDataset(
+            split="train",
+            val_split=max(args.val_split, 0.1),
+            tokenizer=tokenizer,
+            seq_len=args.seq_len,
+            max_files=args.tinystories_max_files,
+            max_tokens=args.tinystories_max_tokens,
+            max_windows=args.tinystories_max_windows,
+        )
+    else:
+        data_path = Path(args.data_file)
+        train_ds = TextDataset(
+            data_path if data_path.exists() else None,
+            tokenizer=tokenizer,
+            seq_len=args.seq_len,
+            split="train",
+            val_split=max(args.val_split, 0.1),
+        )
+
+    loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=False,
+    )
+    if len(loader) == 0:
+        print("Error: benchmark loader is empty; adjust dataset/seq-len settings.", file=sys.stderr)
+        sys.exit(1)
+
+    steps = max(args.benchmark_steps, 1)
+    state_dims = [args.state_dim, args.benchmark_alt_state_dim]
+    results: list[tuple[int, float, float]] = []
+
+    print(
+        f"Benchmark: {steps} update steps per config | dataset={args.dataset} | device={device}",
+        flush=True,
+    )
+
+    for dim in state_dims:
+        if args.dynamics == "multihead" and dim % args.heads != 0:
+            print(
+                f"Skipping state_dim={dim}: not divisible by heads={args.heads} for multihead.",
+                flush=True,
+            )
+            continue
+        model = TorchAttractorLanguageModel(
+            state_dim=dim,
+            tokenizer=tokenizer,
+            dynamics_type=args.dynamics,
+            num_heads=args.heads,
+            rank=args.rank,
+            coupling=args.coupling,
+            ode_solver=args.ode_solver or "euler",
+            adaptive_ode=args.adaptive,
+            ode_atol=args.ode_atol,
+            ode_rtol=args.ode_rtol,
+            hierarchy_levels=args.hierarchy_levels,
+            timescale_ratio=args.timescale_ratio,
+            phrase_vocab_size=args.phrase_vocab_size,
+            phrase_span=args.phrase_span,
+            phrase_attractors=not args.no_phrase_attractors,
+        ).to(device)
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        stream = cycle(loader)
+        model.train()
+        total_loss = 0.0
+        t0 = perf_counter()
+        for _ in range(steps):
+            input_ids, target_ids = next(stream)
+            optimizer.zero_grad()
+            loss = model.training_step(input_ids, target_ids)
+            loss.backward()
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+            total_loss += float(loss.item())
+        elapsed = max(perf_counter() - t0, 1e-9)
+        avg_loss = total_loss / steps
+        steps_per_sec = steps / elapsed
+        results.append((dim, avg_loss, steps_per_sec))
+        print(
+            f"  state_dim={dim:4d} | avg_loss={avg_loss:.4f} | steps/s={steps_per_sec:.2f}",
+            flush=True,
+        )
+
+    if len(results) >= 2:
+        a, b = results[0], results[1]
+        faster = a if a[2] >= b[2] else b
+        lower = a if a[1] <= b[1] else b
+        print(
+            f"Summary: faster={faster[0]}D ({faster[2]:.2f} steps/s), "
+            f"lower-loss={lower[0]}D ({lower[1]:.4f})",
+            flush=True,
+        )
 
 
 def _run_torch_generate(args: argparse.Namespace) -> None:
@@ -253,7 +388,7 @@ def main() -> None:
         default="reason about time and change",
         help="Input prompt (generate mode)",
     )
-    p.add_argument("--mode", choices=["generate", "train"], default="generate", help="generate = default CLI")
+    p.add_argument("--mode", choices=["generate", "train", "benchmark"], default="generate", help="generate = default CLI")
 
     p.add_argument(
         "--legacy",
@@ -318,6 +453,13 @@ def main() -> None:
 
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=0.01)
+    p.add_argument("--benchmark-steps", type=int, default=200, help="Benchmark mode: optimizer update steps per config")
+    p.add_argument(
+        "--benchmark-alt-state-dim",
+        type=int,
+        default=128,
+        help="Benchmark mode: alternate state dimension to compare against --state-dim",
+    )
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--data-file", type=str, default="data/train.txt")
     p.add_argument("--eval-data-file", type=str, default="data/eval.txt", help="Optional eval text (defaults to synthetic if missing)")
@@ -357,6 +499,12 @@ def main() -> None:
     p.add_argument("--eval-every", type=int, default=0, help="Run evaluation every N epochs (0 = disabled)")
     p.add_argument("--grad-clip", type=float, default=1.0, help="Global L2 grad clip (0 = off)")
     p.add_argument(
+        "--log-every-batches",
+        type=int,
+        default=0,
+        help="Optional periodic throughput/loss log interval in batches (0 = off)",
+    )
+    p.add_argument(
         "--train-progress",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -369,6 +517,11 @@ def main() -> None:
 
     p.add_argument("--state-size", type=int, default=128, help="(Legacy NumPy) state dimension")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Request deterministic torch algorithms for training reproducibility (can be slower)",
+    )
     p.add_argument("--no-reset", action="store_true")
     p.add_argument("--candidates", type=str, default="")
     p.add_argument("--list-scores", action="store_true")
@@ -381,6 +534,9 @@ def main() -> None:
 
     if args.mode == "train":
         _run_train(args)
+        return
+    if args.mode == "benchmark":
+        _run_benchmark(args)
         return
 
     if args.checkpoint and not Path(args.checkpoint).exists():
