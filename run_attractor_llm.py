@@ -270,6 +270,7 @@ def _run_train(args: argparse.Namespace) -> None:
             vocab_size=args.synthetic_vocab_size,
             num_sequences=args.synthetic_num_sequences,
             seed=args.seed,
+            max_windows=args.synthetic_max_windows,
         )
         val_ds = SyntheticStoriesDataset(
             split="val",
@@ -278,6 +279,7 @@ def _run_train(args: argparse.Namespace) -> None:
             vocab_size=args.synthetic_vocab_size,
             num_sequences=args.synthetic_num_sequences,
             seed=args.seed,
+            max_windows=args.synthetic_max_windows,
         )
         if len(val_ds) > 0:
             val_loader = DataLoader(
@@ -544,10 +546,10 @@ def _run_train(args: argparse.Namespace) -> None:
                 if plot_path is not None:
                     print(f"  loss_plot: {plot_path}")
         if (epoch + 1) % max(args.save_every, 1) == 0:
-            ckpt_path = out_dir / f"attractor_llm_epoch_{epoch + 1}.pt"
+            ckpt_path = out_dir / f"{args.name}_epoch_{epoch + 1}.pt"
             save_checkpoint(model, ckpt_path, optimizer, metadata=checkpoint_metadata)
 
-    final_path = out_dir / "attractor_llm_final.pt"
+    final_path = out_dir / f"{args.name}_final.pt"
     save_checkpoint(model, final_path, optimizer, metadata=checkpoint_metadata)
     print("Training complete.")
 
@@ -967,6 +969,13 @@ def main() -> None:
         help="Synthetic dataset number of generated sequences (dataset=synthetic)",
     )
     p.add_argument(
+        "--synthetic-max-windows",
+        type=int,
+        default=0,
+        help="Max sliding windows per split after train/val partition (0 = unlimited). "
+        "Caps CPU cost when --synthetic-num-sequences is large.",
+    )
+    p.add_argument(
         "--val-split",
         type=float,
         default=0.0,
@@ -993,6 +1002,12 @@ def main() -> None:
     p.add_argument("--seq-len", type=int, default=8, help="Sliding window length")
     p.add_argument("--save-every", type=int, default=2, help="Save checkpoint every N epochs (train)")
     p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+    p.add_argument(
+        "--name",
+        type=str,
+        default="attractor_llm",
+        help="Checkpoint filename prefix (train): <name>_epoch_<N>.pt and <name>_final.pt",
+    )
     p.add_argument("--eval-every", type=int, default=0, help="Run evaluation every N epochs (0 = disabled)")
     p.add_argument("--grad-clip", type=float, default=1.0, help="Global L2 grad clip (0 = off)")
     p.add_argument(

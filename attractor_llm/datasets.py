@@ -281,6 +281,7 @@ class SyntheticStoriesDataset(Dataset):
         vocab_size: int = 50,
         num_sequences: int = 400,
         seed: int = 42,
+        max_windows: int = 0,
     ) -> None:
         if split not in ("train", "val"):
             raise ValueError("split must be 'train' or 'val'")
@@ -295,6 +296,16 @@ class SyntheticStoriesDataset(Dataset):
         )
         split_idx = int(len(ids) * (1.0 - val_split))
         self.ids = ids[:split_idx] if split == "train" else ids[split_idx:]
+        mw = int(max_windows)
+        if mw > 0:
+            need = mw + self.seq_len
+            if len(self.ids) > need:
+                self.ids = self.ids[:need]
+                print(
+                    f"Synthetic [{split}]: using first {mw:,} windows "
+                    f"(see --synthetic-max-windows; 0 = no limit).",
+                    flush=True,
+                )
         if len(self.ids) < self.seq_len + 1:
             self.ids = self.ids + [0] * (self.seq_len + 1 - len(self.ids))
 
