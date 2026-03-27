@@ -2,4 +2,12 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-checkpoints/
+*.egg-info/
+# Large checkpoints — allow toy npz only
+checkpoints/*
+!checkpoints/toy/
+!checkpoints/toy/**
+checkpoints/tinystories/
+tsos_episodes.json
+benchmark_table.md
+human_blind_stories.json

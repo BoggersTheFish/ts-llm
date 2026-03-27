@@ -1,6 +1,6 @@
 # ts-llm
 
-**Version 0.5.0** — see [CHANGELOG.md](CHANGELOG.md) for release history.
+**Version 0.5.0** — see [CHANGELOG.md](CHANGELOG.md) (pointer) and **[docs/CHANGELOG.md](docs/CHANGELOG.md)** for the attractor workstream log.
 
 A **language reasoning substrate** built from **nonlinear attractor dynamics**. The repository contains:
 

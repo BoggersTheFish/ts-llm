@@ -1,0 +1,17 @@
+name: attractor_50m
+state_dim: 768
+heads: 8
+rank: 64
+epochs: 1
+batch_size: 2
+tinystories_max_files: 4
+tinystories_max_tokens: 500000
+state_clip: 5.0
+state_norm_min: 0.5
+state_norm_max: 3.0
+num_attractor_steps: 24
+num_converge_steps: 16
+euler_steps_range: [10, 40]
+cubic_scale: 0.05
+coupling: 0.01
+target_ce: 2.2
