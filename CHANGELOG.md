@@ -10,11 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Planned
 
 - Phase 3: self-improvement loop, constraint graphs.
+- Phase 3 specification contract added in `PHASE_3_SPEC.md` with isolated controller/adapter boundaries, explicit rollout stages, and safety gates (spec-only, no default behavior change).
 
 ### Added
 
 - Training mode prints dataset summary (windows, batches/epoch, device) and optional per-batch tqdm progress (`--train-progress` default on; `--no-train-progress` to disable).
 - TinyStories: `--tinystories-max-tokens` (default 500k) and `--tinystories-max-windows` (default 2048) so one epoch stays bounded on CPU; shared token cache avoids loading the corpus twice for train+val.
+- Phase 3 isolated stubs (`attractor_llm/phase3/contracts.py`, `controller.py`, `adapter.py`) added as spec-first scaffolding; not active in default runtime path.
+- CLI help now includes concrete multiline examples for new flags/workflows.
+- Added optional config and logging controls: `--config`, `--log-level`, and `--plot-loss`.
+- Added `pyproject.toml` with `ts-llm` script entrypoint for editable installs.
+- Added package `__version__` export from `attractor_llm.__init__`.
+- Integrated opt-in Phase 3 runtime controls for training and generation (`--phase3`, `--phase3-self-improve`, `--phase3-constraints`) with bounded decision budgets.
+- Added offline Phase 3 simulation harness (`--mode phase3-sim`) for replaying JSONL metrics traces through controller/adapter logic.
+- Added strict adapter behavior for Phase 3 decisions (invalid/unknown actions now fail explicitly instead of fallback).
 
 ### Fixed
 

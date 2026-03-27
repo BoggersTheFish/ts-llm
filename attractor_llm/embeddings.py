@@ -1,4 +1,9 @@
-"""Learnable signal embeddings — maps token indices to unit-norm vectors in :math:`\\mathbb{R}^D`."""
+"""Learnable token-to-signal embedding layers.
+
+Note:
+    Embeddings are normalized to unit vectors, keeping attractor signal scale
+    stable across vocabulary rows.
+"""
 
 from __future__ import annotations
 
@@ -9,23 +14,15 @@ from attractor_llm.model import DEFAULT_VOCAB
 
 
 class LearnableProtoEmbedder(nn.Module):
-    r"""
-    Embedding matrix :math:`E \\in \\mathbb{R}^{V \\times D}` followed by layer norm and
-    **row-wise** normalization to the unit sphere:
+    r"""Learnable embedding table projected to unit-norm signal rows.
 
-    .. math::
+    Args:
+        dim: Signal/state dimension.
+        vocab: Optional legacy word vocabulary labels.
+        vocab_size: Optional explicit table width.
 
-        u_i = \frac{\mathrm{LN}(E_i)}{\|\mathrm{LN}(E_i)\|_2}.
-
-    Parameters
-    ----------
-    dim :
-        State / signal dimension :math:`D`.
-    vocab :
-        Optional word list (legacy toy mode). If ``vocab_size`` is set, it overrides
-        ``len(vocab)`` for the embedding table width.
-    vocab_size :
-        If given, embedding has exactly ``vocab_size`` rows (subword / capped vocab).
+    Note:
+        Unit-norm projection keeps token signals comparable for attractor distances.
     """
 
     def __init__(

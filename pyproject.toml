@@ -1,0 +1,18 @@
+[project]
+name = "ts-llm"
+version = "0.5.0"
+description = "Dynamical language substrate based on nonlinear attractor dynamics."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "BoggersTheFish" }
+]
+dependencies = []
+
+[project.scripts]
+ts-llm = "run_attractor_llm:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
