@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Planned
 
 - Phase 3: self-improvement loop, constraint graphs.
+- Phase 3 specification contract added in `PHASE_3_SPEC.md` with isolated controller/adapter boundaries, explicit rollout stages, and safety gates (spec-only, no default behavior change).
 
 ### Added
 
 - Training mode prints dataset summary (windows, batches/epoch, device) and optional per-batch tqdm progress (`--train-progress` default on; `--no-train-progress` to disable).
 - TinyStories: `--tinystories-max-tokens` (default 500k) and `--tinystories-max-windows` (default 2048) so one epoch stays bounded on CPU; shared token cache avoids loading the corpus twice for train+val.
+- Phase 3 isolated stubs (`attractor_llm/phase3/contracts.py`, `controller.py`, `adapter.py`) added as spec-first scaffolding; not active in default runtime path.
 
 ### Fixed
 

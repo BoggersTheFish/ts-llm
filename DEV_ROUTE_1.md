@@ -165,3 +165,19 @@ This gives a quick speed-vs-loss tradeoff before committing to long runs.
 - No invasive architecture rewrites.
 - No irreversible format changes to existing checkpoints.
 
+## Phase 3 Path (spec-first)
+
+Route 1 treats Phase 3 as design-first, not an immediate runtime feature.
+
+- Canonical specification: [`PHASE_3_SPEC.md`](PHASE_3_SPEC.md)
+- Integration policy:
+  1. spec + module stubs only
+  2. offline simulation harness
+  3. opt-in prototype behind flags
+  4. guarded training integration after A/B checks
+- Current spec-first stubs live in `attractor_llm/phase3/contracts.py`, `controller.py`, and `adapter.py`.
+- Hard requirements before enabling by default:
+  - no graph-retention regressions
+  - bounded memory/time budgets
+  - benchmark parity or clear quality win versus Phase 2 baseline
+
