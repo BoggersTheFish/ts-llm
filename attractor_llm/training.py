@@ -1,4 +1,9 @@
-"""Training utilities – fully fixed for TinyStories + grad clipping."""
+"""Training utilities for dataset windows, epochs, and checkpoint IO.
+
+Note:
+    This module must not alter attractor dynamics math. It only orchestrates
+    data windows, optimizer steps, and checkpoint metadata flow.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +11,28 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
 from pathlib import Path
-from typing import Tuple, List
+from typing import Any, Tuple, List
 from time import perf_counter
 from .torch_model import TorchAttractorLanguageModel
 from .tokenizer import AttractorTokenizer
 
 
 class TextDataset(Dataset):
+    """Sliding-window token dataset for custom text files.
+
+    Args:
+        text_file: Optional UTF-8 text file path. If missing, synthetic tokens are used.
+        tokenizer: Optional tokenizer instance. Defaults to ``AttractorTokenizer``.
+        seq_len: Window length for input/target token sequences.
+        split: Dataset split selector, ``"train"`` or ``"val"``.
+        val_split: Fraction reserved for validation when ``split`` is set.
+
+    Raises:
+        ValueError: If ``split`` is invalid or ``val_split`` is out of range.
+
+    Note:
+        This dataset only slices token streams; model dynamics are unaffected.
+    """
     def __init__(
         self,
         text_file: str | Path | None = None,
@@ -20,7 +40,7 @@ class TextDataset(Dataset):
         seq_len: int = 16,
         split: str = "train",
         val_split: float = 0.0,
-    ):
+    ) -> None:
         self.tokenizer = tokenizer or AttractorTokenizer()
         self.seq_len = seq_len
         if split not in ("train", "val"):
@@ -39,7 +59,7 @@ class TextDataset(Dataset):
         if len(self.ids) < self.seq_len + 1:
             self.ids = self.ids + [0] * (self.seq_len + 1 - len(self.ids))
 
-    def __len__(self):
+    def __len__(self) -> int:
         return max(0, len(self.ids) - self.seq_len)
 
     def __getitem__(self, idx: int) -> Tuple[List[int], List[int]]:
@@ -48,7 +68,26 @@ class TextDataset(Dataset):
         return x, y
 
 
-def save_checkpoint(model: TorchAttractorLanguageModel, path: str | Path, optimizer: optim.Optimizer | None = None):
+def save_checkpoint(
+    model: TorchAttractorLanguageModel,
+    path: str | Path,
+    optimizer: optim.Optimizer | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Save model/optimizer state with backward-compatible config fields.
+
+    Args:
+        model: Torch attractor model to serialize.
+        path: Output checkpoint path.
+        optimizer: Optional optimizer whose state will be saved.
+        metadata: Optional additive metadata payload (for example seed/config).
+
+    Returns:
+        None.
+
+    Note:
+        Checkpoint keys are additive to preserve compatibility with older files.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     state = {
@@ -58,13 +97,40 @@ def save_checkpoint(model: TorchAttractorLanguageModel, path: str | Path, optimi
         "config": model.config_dict(),
         "optimizer_state": optimizer.state_dict() if optimizer else None,
     }
+    default_metadata: dict[str, Any] = {"seed": None, "config": model.config_dict()}
+    if metadata is not None:
+        default_metadata.update(metadata)
+    state["metadata"] = default_metadata
     torch.save(state, path)
     print(f"✓ Checkpoint saved: {path}")
 
 
-def load_checkpoint(checkpoint_path: str | Path, device: torch.device = torch.device("cpu")):
+def load_checkpoint(
+    checkpoint_path: str | Path,
+    device: torch.device = torch.device("cpu"),
+) -> tuple[TorchAttractorLanguageModel, dict[str, Any]]:
+    """Load a checkpoint and reconstruct a compatible model instance.
+
+    Args:
+        checkpoint_path: Checkpoint file path.
+        device: Target device for restored tensors.
+
+    Returns:
+        Tuple of ``(model, extras)`` where ``extras`` includes optional
+        ``optimizer_state`` and ``metadata`` fields when available.
+
+    Note:
+        Uses ``.get(...)`` defaults to preserve backward compatibility.
+    """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     cfg = ckpt.get("config") or {}
+    metadata = ckpt.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    loaded_seed = metadata.get("seed")
+    loaded_cfg = metadata.get("config")
+    print(f"Loaded checkpoint metadata seed: {loaded_seed}")
+    print(f"Loaded checkpoint metadata config: {loaded_cfg}")
     state_dim = int(ckpt.get("state_dim", cfg.get("state_dim", 512)))
     vocab = ckpt.get("vocab", cfg.get("vocab"))
 
@@ -104,7 +170,7 @@ def load_checkpoint(checkpoint_path: str | Path, device: torch.device = torch.de
     )
     model.load_state_dict(ckpt.get("model_state", ckpt), strict=False)
     model.to(device)
-    return model, {"optimizer_state": ckpt.get("optimizer_state")}
+    return model, {"optimizer_state": ckpt.get("optimizer_state"), "metadata": metadata}
 
 
 def train_epoch(
@@ -118,8 +184,26 @@ def train_epoch(
     epoch: int = 0,
     total_epochs: int = 1,
     log_every_batches: int = 0,
-):
-    """Train one epoch; supports list/tensor batches and optional grad clipping."""
+) -> float:
+    """Run one training epoch over a dataloader.
+
+    Args:
+        model: Torch attractor language model.
+        loader: Training dataloader yielding ``(input_ids, target_ids)``.
+        optimizer: Optimizer used for parameter updates.
+        device: Active compute device.
+        max_grad_norm: Optional global gradient clipping threshold.
+        progress: Whether to display a tqdm progress bar.
+        epoch: Current epoch index (0-based).
+        total_epochs: Total epoch count.
+        log_every_batches: Optional periodic throughput logging interval.
+
+    Returns:
+        Mean training loss over processed batches.
+
+    Note:
+        This function only controls optimization flow, not attractor equations.
+    """
     try:
         from tqdm import tqdm
     except ImportError:

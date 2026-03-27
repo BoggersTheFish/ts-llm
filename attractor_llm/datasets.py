@@ -1,4 +1,9 @@
-"""Optional TinyStories loader — capped token budget + single load shared by train/val."""
+"""TinyStories dataset utilities with bounded token/window loading.
+
+Note:
+    These utilities only prepare token streams and dataset windows. They do not
+    modify attractor-state evolution, scoring, or training math.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +22,14 @@ _IDS_CACHE: dict[tuple[Any, ...], list[int]] = {}
 
 
 def _tokenizer_key(tokenizer: AttractorTokenizer) -> tuple[Any, ...]:
+    """Build a cache key from tokenizer identity fields.
+
+    Args:
+        tokenizer: Tokenizer used for corpus encoding.
+
+    Returns:
+        Tuple key suitable for process-local token cache indexing.
+    """
     return (tokenizer.encoding_name, int(tokenizer.n_vocab), tokenizer.uses_tiktoken)
 
 
@@ -27,16 +40,23 @@ def load_tinystories_token_ids(
     max_tokens: int | None = None,
     data_dir: Path | None = None,
 ) -> list[int]:
-    """
-    Load TinyStories from extracted JSON under ``data/tinystories/extracted``.
+    """Load TinyStories tokens from extracted JSON shards.
 
-    Parameters
-    ----------
-    max_files :
-        Use at most this many JSON shards (by sorted filename).
-    max_tokens :
-        Stop after this many tokens (after encoding). ``0`` or ``None`` means no limit.
-        A finite cap is strongly recommended on CPU — each shard can hold millions of tokens.
+    Args:
+        tokenizer: Tokenizer used for text-to-token conversion.
+        max_files: Optional number of JSON files to process.
+        max_tokens: Optional token cap; ``0``/``None`` means unlimited.
+        data_dir: Optional dataset root (defaults to ``data/tinystories``).
+
+    Returns:
+        Encoded token list.
+
+    Raises:
+        FileNotFoundError: If neither extracted JSON nor archive is present.
+        RuntimeError: If extraction succeeds but no JSON files are found.
+
+    Note:
+        File and token caps are essential for bounded CPU training.
     """
     unlimited = max_tokens is None or max_tokens <= 0
     cap = None if unlimited else int(max_tokens)
@@ -124,7 +144,24 @@ def load_tinystories_token_ids(
 
 
 class TinyStoriesDataset(Dataset):
-    """Sliding windows over TinyStories token ids (train/val slice of a shared load)."""
+    """Sliding-window dataset view over TinyStories token ids.
+
+    Args:
+        split: ``"train"`` or ``"val"``.
+        val_split: Fraction reserved for validation.
+        tokenizer: Optional tokenizer instance.
+        seq_len: Sliding window length.
+        max_files: Optional cap on JSON shards loaded.
+        max_tokens: Optional cap on total encoded tokens.
+        max_windows: Optional cap on resulting windows per split.
+        data_dir: Optional TinyStories root path.
+
+    Raises:
+        ValueError: If split or val_split arguments are invalid.
+
+    Note:
+        This dataset is data-only and does not alter attractor dynamics.
+    """
 
     DATA_DIR = Path("data/tinystories")
 
@@ -176,7 +213,7 @@ class TinyStoriesDataset(Dataset):
     def __len__(self) -> int:
         return max(0, len(self.ids) - self.seq_len)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> tuple[list[int], list[int]]:
         x = self.ids[idx : idx + self.seq_len]
         y = self.ids[idx + 1 : idx + self.seq_len + 1]
         return x, y

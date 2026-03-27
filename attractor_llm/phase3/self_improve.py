@@ -1,4 +1,9 @@
-"""Experimental training-time advisor (detached, opt-in, safety-first)."""
+"""Experimental detached training-time advisor.
+
+Note:
+    Advisor consumes scalar losses only and never stores autograd-connected
+    tensors, preventing graph-retention side effects.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,8 @@ from attractor_llm.phase3.config import SelfImproveConfig
 
 @dataclass(slots=True)
 class SelfImproveAdvice:
+    """Structured advisory output for optional optimizer nudges."""
+
     active: bool
     lr_scale: float
     clip_scale: float
@@ -30,6 +37,14 @@ class SelfImproveAdvisor:
         self.history: deque[float] = deque(maxlen=max(config.window, 2))
 
     def observe(self, loss_value: float) -> SelfImproveAdvice:
+        """Observe a scalar loss and emit advisory scaling factors.
+
+        Args:
+            loss_value: Latest scalar loss value.
+
+        Returns:
+            Advisory payload with optional lr/clip scaling factors.
+        """
         self.step += 1
         self.history.append(float(loss_value))
         rolling = sum(self.history) / max(len(self.history), 1)

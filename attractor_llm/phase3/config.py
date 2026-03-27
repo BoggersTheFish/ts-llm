@@ -1,4 +1,9 @@
-"""Phase 3 configuration contracts (all features default-off)."""
+"""Phase 3 configuration contracts with default-off behavior.
+
+Note:
+    These dataclasses define optional controls only. They do not activate
+    runtime Phase 3 behavior unless explicitly wired by future integration.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,8 @@ from typing import Any
 
 @dataclass(slots=True)
 class ConstraintConfig:
+    """Configuration for deterministic generation-time constraint shaping."""
+
     enabled: bool = False
     max_repeat: int = 3
     repeat_penalty: float = 0.35
@@ -15,6 +22,8 @@ class ConstraintConfig:
 
 @dataclass(slots=True)
 class SelfImproveConfig:
+    """Configuration for detached training-time advisory behavior."""
+
     enabled: bool = False
     warmup_batches: int = 64
     window: int = 32
@@ -31,10 +40,23 @@ class Phase3Config:
 
     @classmethod
     def disabled(cls) -> "Phase3Config":
+        """Create a fully disabled Phase 3 configuration.
+
+        Returns:
+            Disabled ``Phase3Config`` instance.
+        """
         return cls(constraints=ConstraintConfig(), self_improve=SelfImproveConfig(), metrics=False)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "Phase3Config":
+        """Build config from a possibly partial dictionary payload.
+
+        Args:
+            data: Optional raw mapping.
+
+        Returns:
+            Normalized ``Phase3Config`` with defaults.
+        """
         if not data:
             return cls.disabled()
         c = data.get("constraints") if isinstance(data, dict) else None
@@ -53,4 +75,9 @@ class Phase3Config:
         return cls(constraints=constraints, self_improve=self_improve, metrics=bool(data.get("metrics", False)))
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize config to a plain dictionary.
+
+        Returns:
+            Dictionary representation of the config dataclass tree.
+        """
         return asdict(self)

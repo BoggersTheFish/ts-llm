@@ -1,4 +1,9 @@
-"""Phase 3 adapter stub for validated, step-boundary decision application."""
+"""Phase 3 adapter stub for validated decision application.
+
+Note:
+    Current implementation validates decisions but does not mutate runtime
+    attractor behavior. This preserves baseline training/generation semantics.
+"""
 
 from __future__ import annotations
 
@@ -9,23 +14,35 @@ from attractor_llm.phase3.contracts import Phase3Decision
 
 @dataclass(slots=True)
 class Phase3ApplyResult:
+    """Structured result describing adapter application outcome."""
+
     applied: bool
     fallback_triggered: bool
     message: str
 
 
 class Phase3Adapter:
-    """
-    Adapter boundary between controller decisions and runtime systems.
+    """Boundary between controller decisions and runtime hooks.
 
-    This stub does not mutate model state. It validates decisions and returns
-    structured results so future integration can remain explicit and safe.
+    Args:
+        safe_fallback: Whether unknown/invalid decisions should trigger fallback.
+
+    Note:
+        This stub validates only; it intentionally performs no model mutation.
     """
 
     def __init__(self, safe_fallback: bool = True) -> None:
         self.safe_fallback = bool(safe_fallback)
 
     def apply(self, decision: Phase3Decision) -> Phase3ApplyResult:
+        """Validate and accept/reject a Phase 3 decision.
+
+        Args:
+            decision: Controller-emitted typed decision payload.
+
+        Returns:
+            Application result including fallback state and message.
+        """
         action = decision.get("action", "noop")
         ttl = int(decision.get("ttl_steps", 0))
         if ttl < 1:

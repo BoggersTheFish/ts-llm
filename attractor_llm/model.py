@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import numpy.typing as npt
 
 from attractor_llm.core import (
     converge,
@@ -14,7 +15,7 @@ from attractor_llm.core import (
     text_to_signal,
 )
 
-DEFAULT_VOCAB = [
+DEFAULT_VOCAB: list[str] = [
     "the",
     "a",
     "is",
@@ -112,9 +113,9 @@ class GenerationResult:
     """Text from proto-concept sequence plus optional per-step scores and distances."""
 
     text: str
-    tokens: List[str]
-    scores: Optional[List[Tuple[str, float]]] = None
-    distances: Optional[List[Tuple[str, float]]] = None
+    tokens: list[str]
+    scores: list[tuple[str, float]] | None = None
+    distances: list[tuple[str, float]] | None = None
 
 
 @dataclass
@@ -139,7 +140,7 @@ class AttractorLanguageModel:
     """
 
     state_size: int = 128
-    vocab: List[str] = field(default_factory=lambda: list(DEFAULT_VOCAB))
+    vocab: list[str] = field(default_factory=lambda: list(DEFAULT_VOCAB))
     config: GenerationConfig = field(default_factory=GenerationConfig)
     seed: int = 42
 
@@ -147,8 +148,8 @@ class AttractorLanguageModel:
         self._rng = np.random.Generator(np.random.PCG64(self.seed))
         self._diffusion = make_diffusion_matrix(self.state_size, self._rng)
         self._state = np.zeros(self.state_size, dtype=np.float64)
-        self._signals: dict[str, np.ndarray] = {}
-        self._attractors: dict[str, np.ndarray] = {}
+        self._signals: dict[str, npt.NDArray[np.float64]] = {}
+        self._attractors: dict[str, npt.NDArray[np.float64]] = {}
         self._build_proto_library()
 
     def _run_converge(

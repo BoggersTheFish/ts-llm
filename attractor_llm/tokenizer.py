@@ -1,10 +1,8 @@
-"""
-Subword tokenization with :mod:`tiktoken`, with a **word-list fallback** that matches the
-legacy :data:`~attractor_llm.model.DEFAULT_VOCAB` toy setup.
+"""Tokenizer utilities with tiktoken and deterministic word fallback.
 
-When ``tiktoken`` is available, text is encoded with a BPE vocabulary (default **GPT-2**
-``gpt2`` encoding). Token ids are filtered to ``[0, n)`` where ``n = min(vocab_cap, enc.n_vocab)``
-so the learnable embedding table has finite width **without** ambiguous modular decoding.
+Note:
+    Token IDs are capped to a bounded vocabulary width to keep embedding/logit
+    tables manageable while preserving deterministic decode behavior.
 """
 
 from __future__ import annotations
@@ -17,16 +15,15 @@ from attractor_llm.model import DEFAULT_VOCAB
 
 
 class AttractorTokenizer:
-    r"""
-    Parameters
-    ----------
-    encoding_name :
-        ``tiktoken`` encoding name (e.g. ``"gpt2"``). Ignored in word fallback mode.
-    vocab_cap :
-        Maximum number of distinct token ids exposed to the model (embedding rows).
-        If ``None``, uses the encoder's full vocabulary size (capped by the encoding).
-    use_tiktoken :
-        If ``False``, always use the word-list fallback (offline / deterministic).
+    """Tokenizer with optional GPT-style BPE and word-list fallback.
+
+    Args:
+        encoding_name: tiktoken encoding name (for example, ``"gpt2"``).
+        vocab_cap: Optional maximum exposed token ID width.
+        use_tiktoken: Whether to attempt tiktoken mode.
+
+    Note:
+        When tiktoken is disabled/unavailable, deterministic word-list mode is used.
     """
 
     def __init__(

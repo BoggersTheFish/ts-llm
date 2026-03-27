@@ -1,6 +1,13 @@
-"""Nonlinear attractor dynamics: NumPy (legacy) and optional PyTorch (trainable) core."""
+"""Public package exports for NumPy and PyTorch attractor components.
+
+Note:
+    Import surface is additive and checkpoint-safe; core attractor equations
+    live in submodules and are not modified here.
+"""
 
 from __future__ import annotations
+
+__version__ = "0.5.0"
 
 from attractor_llm.core import (
     center,
@@ -13,7 +20,8 @@ from attractor_llm.core import (
 )
 from attractor_llm.model import AttractorLanguageModel, GenerationConfig, GenerationResult
 
-__all__ = [
+__all__: list[str] = [
+    "__version__",
     "text_to_signal",
     "make_diffusion_matrix",
     "linear_diffusion",

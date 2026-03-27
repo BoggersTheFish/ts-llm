@@ -1,4 +1,8 @@
-"""Phase 3 isolated interfaces (spec-first, runtime-inactive by default)."""
+"""Phase 3 isolated interfaces (spec-first, runtime-inactive by default).
+
+Note:
+    Importing this package does not activate Phase 3 runtime behavior.
+"""
 
 from attractor_llm.phase3.adapter import Phase3Adapter, Phase3ApplyResult
 from attractor_llm.phase3.config import ConstraintConfig, Phase3Config, SelfImproveConfig

@@ -1,4 +1,9 @@
-"""Typed contracts for isolated Phase 3 decisions and metric snapshots."""
+"""Typed contracts for isolated Phase 3 decisions and metric snapshots.
+
+Note:
+    Contracts are intentionally minimal and explicit to keep Phase 3 behavior
+    optional and bounded during staged rollout.
+"""
 
 from __future__ import annotations
 

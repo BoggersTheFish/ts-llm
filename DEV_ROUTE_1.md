@@ -159,6 +159,23 @@ This gives a quick speed-vs-loss tradeoff before committing to long runs.
 - If one config has materially lower loss with acceptable speed, pick lower loss.
 - Re-run benchmark with a second seed before locking a long training run.
 
+### Config and logging (implemented)
+
+- Optional `config.yaml` overrides via `--config` (or auto-load `./config.yaml` when present).
+- Structured logging via `--log-level` with a resolved config summary at train/benchmark start.
+- Optional `--plot-loss` emits train/val sparklines and PNG curve output after eval.
+
+### Developer experience (implemented)
+
+- Package now exports `__version__` in `attractor_llm.__init__`.
+- CLI `--help` includes concrete multi-line examples for legacy, train, benchmark, and config-driven workflows.
+- Editable install support via `pyproject.toml` and script entrypoint:
+
+```bash
+pip install -e .
+ts-llm --help
+```
+
 ## Non-Goals for Route 1
 
 - No speculative self-reflection loops in core training path.
