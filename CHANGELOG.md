@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added optional config and logging controls: `--config`, `--log-level`, and `--plot-loss`.
 - Added `pyproject.toml` with `ts-llm` script entrypoint for editable installs.
 - Added package `__version__` export from `attractor_llm.__init__`.
+- Integrated opt-in Phase 3 runtime controls for training and generation (`--phase3`, `--phase3-self-improve`, `--phase3-constraints`) with bounded decision budgets.
+- Added offline Phase 3 simulation harness (`--mode phase3-sim`) for replaying JSONL metrics traces through controller/adapter logic.
+- Added strict adapter behavior for Phase 3 decisions (invalid/unknown actions now fail explicitly instead of fallback).
 
 ### Fixed
 

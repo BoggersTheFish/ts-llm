@@ -10,11 +10,24 @@ from __future__ import annotations
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Tuple, List
+from typing import Any, Callable, Tuple, List
 from time import perf_counter
 from .torch_model import TorchAttractorLanguageModel
 from .tokenizer import AttractorTokenizer
+
+
+@dataclass(slots=True)
+class TrainBatchMetrics:
+    """Per-batch scalar metrics emitted by `train_epoch` callbacks."""
+
+    epoch: int
+    step: int
+    train_loss: float
+    grad_norm: float | None
+    steps_per_sec: float
+    timestamp_s: float
 
 
 class TextDataset(Dataset):
@@ -184,6 +197,8 @@ def train_epoch(
     epoch: int = 0,
     total_epochs: int = 1,
     log_every_batches: int = 0,
+    max_grad_norm_fn: Callable[[], float | None] | None = None,
+    on_batch_end: Callable[[TrainBatchMetrics], None] | None = None,
 ) -> float:
     """Run one training epoch over a dataloader.
 
@@ -197,6 +212,8 @@ def train_epoch(
         epoch: Current epoch index (0-based).
         total_epochs: Total epoch count.
         log_every_batches: Optional periodic throughput logging interval.
+        max_grad_norm_fn: Optional callable that returns batch-specific clip threshold.
+        on_batch_end: Optional callback invoked once per optimizer step with scalar metrics.
 
     Returns:
         Mean training loss over processed batches.
@@ -236,20 +253,35 @@ def train_epoch(
         loss = model.training_step(input_ids, target_ids)
         loss.backward()
 
-        if max_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        grad_norm_value: float | None = None
+        active_clip = max_grad_norm_fn() if max_grad_norm_fn is not None else max_grad_norm
+        if active_clip is not None:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), active_clip)
+            grad_norm_value = float(grad_norm.item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
 
         optimizer.step()
         total_loss += loss.item()
         n_batches += 1
         window_batches += 1
+        now = perf_counter()
+        overall = max(now - epoch_start, 1e-9)
+        avg_bps = n_batches / overall
+
+        if on_batch_end is not None:
+            on_batch_end(
+                TrainBatchMetrics(
+                    epoch=epoch + 1,
+                    step=n_batches,
+                    train_loss=float(loss.item()),
+                    grad_norm=grad_norm_value,
+                    steps_per_sec=avg_bps,
+                    timestamp_s=now,
+                )
+            )
 
         if log_every_batches > 0 and n_batches % log_every_batches == 0:
-            now = perf_counter()
             elapsed = max(now - window_start, 1e-9)
-            overall = max(now - epoch_start, 1e-9)
             bps = window_batches / elapsed
-            avg_bps = n_batches / overall
             msg = (
                 f"[train] epoch {epoch + 1}/{total_epochs} "
                 f"batch {n_batches}/{len(loader)} "

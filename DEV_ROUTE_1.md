@@ -182,19 +182,21 @@ ts-llm --help
 - No invasive architecture rewrites.
 - No irreversible format changes to existing checkpoints.
 
-## Phase 3 Path (spec-first)
+## Phase 3 Path (fully integrated, opt-in)
 
-Route 1 treats Phase 3 as design-first, not an immediate runtime feature.
+Route 1 now includes a complete Phase 3 implementation with default-off activation.
 
-- Canonical specification: [`PHASE_3_SPEC.md`](PHASE_3_SPEC.md)
-- Integration policy:
-  1. spec + module stubs only
-  2. offline simulation harness
-  3. opt-in prototype behind flags
-  4. guarded training integration after A/B checks
-- Current spec-first stubs live in `attractor_llm/phase3/contracts.py`, `controller.py`, and `adapter.py`.
-- Hard requirements before enabling by default:
-  - no graph-retention regressions
-  - bounded memory/time budgets
-  - benchmark parity or clear quality win versus Phase 2 baseline
+- Canonical specification remains: [`PHASE_3_SPEC.md`](PHASE_3_SPEC.md)
+- Integrated components:
+  - controller+adapter actions at train step boundaries (`--phase3`)
+  - detached self-improve advisory policy (`--phase3-self-improve`)
+  - deterministic generation constraints (`--phase3-constraints`)
+  - offline replay harness (`--mode phase3-sim`, `--phase3-trace`)
+- Runtime controls:
+  - `--phase3-budget-steps`, `--phase3-budget-seconds`
+  - `--phase3-warmup-batches`, `--phase3-window`, `--phase3-strength`
+  - `--phase3-max-repeat`, `--phase3-repeat-penalty`
+- Enforcement policy:
+  - strict application path (no silent fallback on invalid decisions)
+  - additive checkpoint schema and unchanged core attractor equations
 

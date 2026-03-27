@@ -36,9 +36,16 @@ The default PyTorch dynamics module partitions the state into \(H\) heads. Each 
 
 With **`--hierarchy-levels 2`** (and **`--dynamics multihead`**), the state splits into **fast** and **slow** halves of \(\mathbb{R}^D\). The **fast** half uses token-level signals (syntax); the **slow** half uses a learned **phrase** table (8192 rows by default) with a rolling phrase id over the last **`--phrase-span`** tokens. The slow block uses smaller \(\Delta t\) and weaker cubic gain (``1/`` **`--timescale-ratio`**) so it evolves more slowly. Next-token logits still use negative-distance to the **combined** state and token-level proto-attractors. Requires **even** `--state-dim` and **even** `--heads`.
 
-### Phase 3 (planned, spec-only)
+### Phase 3 (integrated, opt-in)
 
-Phase 3 is currently defined as a guarded, opt-in control layer around the existing training path. It is **not enabled by default** and does not change current runtime behavior. See [PHASE_3_SPEC.md](PHASE_3_SPEC.md) for objectives, interfaces, safety gates, and staged rollout.
+Phase 3 now ships as an opt-in control system around training/generation:
+
+- `--phase3` enables controller+adapter decisions at train step boundaries.
+- `--phase3-self-improve` enables detached loss-trend advisory LR/clip scaling.
+- `--phase3-constraints` enables deterministic repeat-penalty logits shaping for torch generation.
+- `--mode phase3-sim` replays JSONL metric traces through the controller/adapter offline harness.
+
+Core attractor dynamics remain unchanged; Phase 3 only adjusts runtime controls (learning rate, clipping scale, and optional generation constraints). See [PHASE_3_SPEC.md](PHASE_3_SPEC.md) for architecture and contracts.
 
 ---
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import torch
 import torch.nn as nn
@@ -320,6 +320,7 @@ class TorchAttractorLanguageModel(nn.Module):
         *,
         num_converge_steps: int | None = None,
         num_attractor_steps: int | None = None,
+        logits_adjust_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     ) -> str:
         """Greedy generation from distance logits; decodes with tokenizer when set."""
         self.eval()
@@ -349,6 +350,8 @@ class TorchAttractorLanguageModel(nn.Module):
         out_ids: list[int] = []
         for _ in range(max_tokens):
             logits = self.logits_from_state(state, attractors)
+            if logits_adjust_fn is not None:
+                logits = logits_adjust_fn(logits, seq_tensor)
             nxt = int(logits.argmax(dim=-1).item())
             out_ids.append(nxt)
             seq_tensor = torch.cat([seq_tensor, torch.tensor([nxt], device=device, dtype=torch.long)])

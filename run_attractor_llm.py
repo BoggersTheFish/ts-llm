@@ -15,6 +15,7 @@ import math
 import sys
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from attractor_llm import AttractorLanguageModel, GenerationResult
@@ -169,7 +170,16 @@ def _run_train(args: argparse.Namespace) -> None:
 
     from attractor_llm.tokenizer import AttractorTokenizer
     from attractor_llm.torch_model import TorchAttractorLanguageModel
-    from attractor_llm.training import load_checkpoint, save_checkpoint, train_epoch, TextDataset
+    from attractor_llm.training import (
+        TextDataset,
+        TrainBatchMetrics,
+        load_checkpoint,
+        save_checkpoint,
+        train_epoch,
+    )
+    from attractor_llm.phase3 import Phase3Adapter, Phase3Controller, Phase3RuntimeState
+    from attractor_llm.phase3.self_improve import SelfImproveAdvisor
+    from attractor_llm.phase3.config import SelfImproveConfig
 
     logger = logging.getLogger("ts_llm.train")
     random.seed(args.seed)
@@ -346,6 +356,90 @@ def _run_train(args: argparse.Namespace) -> None:
     checkpoint_metadata = {"seed": int(args.seed), "config": vars(args).copy()}
     train_losses: list[float] = []
     val_losses: list[float] = []
+    phase3_controller = Phase3Controller(enabled=bool(args.phase3), budget_steps=max(args.phase3_budget_steps, 0))
+    phase3_adapter = Phase3Adapter()
+    phase3_runtime = Phase3RuntimeState(
+        clip_scale=1.0,
+        constraints_enabled=bool(args.phase3_constraints),
+    )
+    phase3_advisor = SelfImproveAdvisor(
+        SelfImproveConfig(
+            enabled=bool(args.phase3 and args.phase3_self_improve),
+            warmup_batches=max(args.phase3_warmup_batches, 1),
+            window=max(args.phase3_window, 2),
+            strength=max(args.phase3_strength, 0.0),
+        )
+    )
+    phase3_start_s = perf_counter()
+    phase3_trace_path = out_dir / "phase3_trace.jsonl"
+    if args.phase3:
+        phase3_trace_path.write_text("", encoding="utf-8")
+
+    if args.phase3 and args.phase3_constraints:
+        phase3_adapter.apply(
+            {"action": "set_constraints", "params": {"enabled": True}, "reason": "boot", "ttl_steps": 1},
+            optimizer=optimizer,
+            runtime=phase3_runtime,
+        )
+
+    def _current_clip() -> float | None:
+        if args.grad_clip <= 0:
+            return None
+        return float(args.grad_clip) * float(phase3_runtime.clip_scale)
+
+    def _on_batch_end(metrics: TrainBatchMetrics) -> None:
+        if not args.phase3:
+            return
+        elapsed = perf_counter() - phase3_start_s
+        if args.phase3_budget_seconds > 0 and elapsed >= float(args.phase3_budget_seconds):
+            return
+        snapshot = {
+            "epoch": int(metrics.epoch),
+            "step": int(metrics.step),
+            "train_loss": float(metrics.train_loss),
+            "val_loss": None,
+            "steps_per_sec": float(metrics.steps_per_sec),
+            "grad_norm": metrics.grad_norm,
+            "timestamp_s": float(metrics.timestamp_s),
+        }
+        with phase3_trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(snapshot, sort_keys=True) + "\n")
+        decision = phase3_controller.decide(snapshot)
+        apply_result = phase3_adapter.apply(decision, optimizer=optimizer, runtime=phase3_runtime)
+
+        advice = phase3_advisor.observe(float(metrics.train_loss))
+        if advice.active:
+            phase3_adapter.apply(
+                {
+                    "action": "adjust_lr",
+                    "params": {"lr_scale": float(advice.lr_scale)},
+                    "reason": "self_improve_lr",
+                    "ttl_steps": 1,
+                },
+                optimizer=optimizer,
+                runtime=phase3_runtime,
+            )
+            phase3_adapter.apply(
+                {
+                    "action": "adjust_clip",
+                    "params": {"clip_scale": float(advice.clip_scale)},
+                    "reason": "self_improve_clip",
+                    "ttl_steps": 1,
+                },
+                optimizer=optimizer,
+                runtime=phase3_runtime,
+            )
+
+        if args.log_every_batches > 0 and metrics.step % args.log_every_batches == 0:
+            logger.info(
+                "[phase3] epoch=%s step=%s action=%s msg=%s lr=%.6g clip_scale=%.4f",
+                metrics.epoch,
+                metrics.step,
+                decision["action"],
+                apply_result.message,
+                float(optimizer.param_groups[0]["lr"]),
+                float(phase3_runtime.clip_scale),
+            )
 
     for epoch in range(args.epochs):
         loss = train_epoch(
@@ -353,11 +447,12 @@ def _run_train(args: argparse.Namespace) -> None:
             train_loader,
             optimizer,
             device,
-            max_grad_norm=args.grad_clip if args.grad_clip > 0 else None,
+            max_grad_norm_fn=_current_clip,
             progress=args.train_progress,
             epoch=epoch,
             total_epochs=args.epochs,
             log_every_batches=args.log_every_batches,
+            on_batch_end=_on_batch_end,
         )
         train_losses.append(float(loss))
         print(f"Epoch {epoch + 1:02d} | train_loss: {loss:.4f}")
@@ -558,6 +653,8 @@ def _run_torch_generate(args: argparse.Namespace) -> None:
     """
     import torch
 
+    from attractor_llm.phase3.config import ConstraintConfig
+    from attractor_llm.phase3.constraint_graph import DeterministicConstraintGraph
     from attractor_llm.torch_model import TorchAttractorLanguageModel
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -569,8 +666,54 @@ def _run_torch_generate(args: argparse.Namespace) -> None:
         model.ode.adaptive_ode = True
     if args.ode_solver is not None:
         model.ode.ode_solver = args.ode_solver
-    text = model.generate(args.prompt, max_tokens=args.max_tokens)
+    constraint_graph = DeterministicConstraintGraph(
+        ConstraintConfig(
+            enabled=bool(args.phase3 and args.phase3_constraints),
+            max_repeat=max(args.phase3_max_repeat, 1),
+            repeat_penalty=max(float(args.phase3_repeat_penalty), 0.0),
+        )
+    )
+    text = model.generate(
+        args.prompt,
+        max_tokens=args.max_tokens,
+        logits_adjust_fn=constraint_graph.adjust_logits if constraint_graph.config.enabled else None,
+    )
     print(text)
+
+
+def _run_phase3_simulation(args: argparse.Namespace) -> None:
+    """Run offline Phase 3 policy replay from a JSONL metrics trace file."""
+    import json as _json
+
+    from attractor_llm.phase3 import Phase3Adapter, Phase3Controller, run_offline_simulation, snapshots_from_dicts
+
+    trace_path = Path(args.phase3_trace)
+    if not trace_path.exists():
+        print(f"Error: phase3 trace file not found: {trace_path}", file=sys.stderr)
+        sys.exit(1)
+
+    rows: list[dict[str, Any]] = []
+    for raw in trace_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        rows.append(_json.loads(line))
+    snapshots = snapshots_from_dicts(rows)
+
+    controller = Phase3Controller(enabled=True, budget_steps=max(args.phase3_budget_steps, 0))
+    adapter = Phase3Adapter()
+    results = run_offline_simulation(
+        snapshots,
+        base_lr=float(args.phase3_base_lr),
+        controller=controller,
+        adapter=adapter,
+    )
+    print(f"Phase3 simulation replayed {len(results)} step(s).")
+    for item in results[: min(len(results), 20)]:
+        print(
+            f"  step={item.step:4d} action={item.action:12s} "
+            f"lr={item.lr:.6g} clip_scale={item.clip_scale:.4f} reason={item.reason}"
+        )
 
 
 def main() -> None:
@@ -587,6 +730,7 @@ def main() -> None:
             "  ts-llm --mode train --dataset custom --data-file data/train.txt --seed 42\n"
             "  ts-llm --mode train --dataset custom --eval-every 1 --plot-loss\n"
             "  ts-llm --mode benchmark --state-dim 64 --benchmark-alt-state-dim 96 --benchmark-steps 200\n"
+            "  ts-llm --mode train --phase3 --phase3-self-improve --phase3-budget-steps 200\n"
             "  ts-llm --config config.yaml --log-level DEBUG --mode train\n"
         ),
         formatter_class=_HelpFormatter,
@@ -610,7 +754,12 @@ def main() -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging verbosity for structured runtime logs.",
     )
-    p.add_argument("--mode", choices=["generate", "train", "benchmark"], default="generate", help="generate = default CLI")
+    p.add_argument(
+        "--mode",
+        choices=["generate", "train", "benchmark", "phase3-sim"],
+        default="generate",
+        help="generate = default CLI",
+    )
 
     p.add_argument(
         "--legacy",
@@ -749,6 +898,45 @@ def main() -> None:
         action="store_true",
         help="Request deterministic torch algorithms for training reproducibility (can be slower)",
     )
+    p.add_argument(
+        "--phase3",
+        action="store_true",
+        help="Enable integrated Phase 3 control loop (off by default).",
+    )
+    p.add_argument(
+        "--phase3-budget-steps",
+        type=int,
+        default=0,
+        help="Hard cap on controller decision steps (0 = unlimited while --phase3 is on).",
+    )
+    p.add_argument(
+        "--phase3-budget-seconds",
+        type=float,
+        default=0.0,
+        help="Hard wall-clock cap for Phase 3 decision making in each run (0 = unlimited).",
+    )
+    p.add_argument(
+        "--phase3-self-improve",
+        action="store_true",
+        help="Enable detached loss-trend advisor for LR/clip scaling.",
+    )
+    p.add_argument("--phase3-warmup-batches", type=int, default=64, help="Self-improve warmup before advisory actions.")
+    p.add_argument("--phase3-window", type=int, default=32, help="Rolling loss window for self-improve policy.")
+    p.add_argument("--phase3-strength", type=float, default=0.10, help="Advisory action strength for LR/clip scaling.")
+    p.add_argument(
+        "--phase3-constraints",
+        action="store_true",
+        help="Enable deterministic repeat-penalty constraints during torch generation.",
+    )
+    p.add_argument("--phase3-max-repeat", type=int, default=3, help="Max consecutive token repeats before penalty.")
+    p.add_argument(
+        "--phase3-repeat-penalty",
+        type=float,
+        default=0.35,
+        help="Logit penalty applied to excessive repeated token during generation.",
+    )
+    p.add_argument("--phase3-trace", type=str, default="phase3_trace.jsonl", help="JSONL trace for --mode phase3-sim.")
+    p.add_argument("--phase3-base-lr", type=float, default=0.001, help="Base LR used for offline --mode phase3-sim.")
     p.add_argument("--no-reset", action="store_true")
     p.add_argument("--candidates", type=str, default="")
     p.add_argument("--list-scores", action="store_true")
@@ -766,6 +954,9 @@ def main() -> None:
         return
     if args.mode == "benchmark":
         _run_benchmark(args)
+        return
+    if args.mode == "phase3-sim":
+        _run_phase3_simulation(args)
         return
 
     if args.checkpoint and not Path(args.checkpoint).exists():

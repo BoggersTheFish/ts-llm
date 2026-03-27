@@ -37,6 +37,9 @@ class Phase3Config:
     constraints: ConstraintConfig
     self_improve: SelfImproveConfig
     metrics: bool = False
+    enabled: bool = False
+    budget_steps: int = 0
+    budget_seconds: float = 0.0
 
     @classmethod
     def disabled(cls) -> "Phase3Config":
@@ -45,7 +48,14 @@ class Phase3Config:
         Returns:
             Disabled ``Phase3Config`` instance.
         """
-        return cls(constraints=ConstraintConfig(), self_improve=SelfImproveConfig(), metrics=False)
+        return cls(
+            constraints=ConstraintConfig(),
+            self_improve=SelfImproveConfig(),
+            metrics=False,
+            enabled=False,
+            budget_steps=0,
+            budget_seconds=0.0,
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "Phase3Config":
@@ -72,7 +82,14 @@ class Phase3Config:
             window=int((s or {}).get("window", 32)),
             strength=float((s or {}).get("strength", 0.10)),
         )
-        return cls(constraints=constraints, self_improve=self_improve, metrics=bool(data.get("metrics", False)))
+        return cls(
+            constraints=constraints,
+            self_improve=self_improve,
+            metrics=bool(data.get("metrics", False)),
+            enabled=bool(data.get("enabled", False)),
+            budget_steps=int(data.get("budget_steps", 0)),
+            budget_seconds=float(data.get("budget_seconds", 0.0)),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize config to a plain dictionary.

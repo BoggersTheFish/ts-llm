@@ -1,7 +1,7 @@
 # Phase 3 Specification
 
 Phase 3 is a guarded, opt-in extension for adaptive control around the existing attractor LM substrate.
-This document is design-only. It does not change current runtime behavior.
+The integration now exists in runtime behind explicit flags and remains off by default.
 
 ## Problem Statement
 
@@ -83,7 +83,7 @@ Rules:
 - `--phase3` (default off)
 - `--phase3-budget-steps N` (hard cap on Phase 3 decision windows)
 - `--phase3-budget-seconds N` (hard wall-clock cap)
-- `--phase3-safe-fallback` (default on; disables Phase 3 on invalid decision)
+- strict decision application (invalid decisions raise explicit errors; no silent fallback)
 
 Runtime guards:
 - Never call backward twice on the same graph path.
@@ -129,10 +129,11 @@ Minimum acceptance for enabling wider tests:
 
 ## Current Status
 
-Phase 3 is currently in spec-first mode with isolated stubs under `attractor_llm/phase3`:
-- `contracts.py`
-- `controller.py`
-- `adapter.py`
+Phase 3 is implemented as an opt-in subsystem under `attractor_llm/phase3` with:
+- integrated training-time controller/adapter path behind `--phase3`
+- detached self-improve advisor behind `--phase3-self-improve`
+- generation-time deterministic constraints behind `--phase3-constraints`
+- offline replay harness available in `--mode phase3-sim`
 
-These stubs are not wired into the default training/generation path. Implementation should proceed in small, testable PRs starting with offline simulation.
+Default train/generate behavior remains unchanged when flags are not set.
 
