@@ -28,6 +28,8 @@ class TrainBatchMetrics:
     grad_norm: float | None
     steps_per_sec: float
     timestamp_s: float
+    optimizer_step: bool
+    non_finite_detected: bool
 
 
 class TextDataset(Dataset):
@@ -180,6 +182,22 @@ def load_checkpoint(
         phrase_vocab_size=int(cfg.get("phrase_vocab_size", 8192)),
         phrase_span=int(cfg.get("phrase_span", 4)),
         phrase_attractors=bool(cfg.get("phrase_attractors", True)),
+        state_clip_value=(
+            float(cfg.get("state_clip_value"))
+            if cfg.get("state_clip_value") is not None
+            else None
+        ),
+        state_norm_floor=float(cfg.get("state_norm_floor", 0.5)),
+        state_norm_ceiling=(
+            float(cfg.get("state_norm_ceiling"))
+            if cfg.get("state_norm_ceiling") is not None
+            else None
+        ),
+        state_target_norm=(
+            float(cfg.get("state_target_norm"))
+            if cfg.get("state_target_norm") is not None
+            else None
+        ),
     )
     model.load_state_dict(ckpt.get("model_state", ckpt), strict=False)
     model.to(device)
@@ -243,6 +261,7 @@ def train_epoch(
         )
 
     n_batches = 0
+    n_updates = 0
     epoch_start = perf_counter()
     window_start = epoch_start
     window_batches = 0
@@ -251,17 +270,41 @@ def train_epoch(
 
         optimizer.zero_grad()
         loss = model.training_step(input_ids, target_ids)
+        loss_value = float(loss.item())
+        if not torch.isfinite(torch.as_tensor(loss_value)):
+            n_batches += 1
+            now = perf_counter()
+            overall = max(now - epoch_start, 1e-9)
+            avg_bps = n_batches / overall
+            if on_batch_end is not None:
+                on_batch_end(
+                    TrainBatchMetrics(
+                        epoch=epoch + 1,
+                        step=n_batches,
+                        train_loss=loss_value,
+                        grad_norm=None,
+                        steps_per_sec=avg_bps,
+                        timestamp_s=now,
+                        optimizer_step=False,
+                        non_finite_detected=True,
+                    )
+                )
+            continue
         loss.backward()
 
         grad_norm_value: float | None = None
+        non_finite_grad = False
         active_clip = max_grad_norm_fn() if max_grad_norm_fn is not None else max_grad_norm
         if active_clip is not None:
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), active_clip)
             grad_norm_value = float(grad_norm.item()) if isinstance(grad_norm, torch.Tensor) else float(grad_norm)
-
-        optimizer.step()
-        total_loss += loss.item()
+            if not torch.isfinite(torch.as_tensor(grad_norm_value)):
+                non_finite_grad = True
         n_batches += 1
+        if not non_finite_grad:
+            optimizer.step()
+            total_loss += loss_value
+            n_updates += 1
         window_batches += 1
         now = perf_counter()
         overall = max(now - epoch_start, 1e-9)
@@ -272,10 +315,12 @@ def train_epoch(
                 TrainBatchMetrics(
                     epoch=epoch + 1,
                     step=n_batches,
-                    train_loss=float(loss.item()),
+                    train_loss=loss_value,
                     grad_norm=grad_norm_value,
                     steps_per_sec=avg_bps,
                     timestamp_s=now,
+                    optimizer_step=not non_finite_grad,
+                    non_finite_detected=non_finite_grad,
                 )
             )
 
@@ -285,7 +330,7 @@ def train_epoch(
             msg = (
                 f"[train] epoch {epoch + 1}/{total_epochs} "
                 f"batch {n_batches}/{len(loader)} "
-                f"loss={loss.item():.4f} bps={bps:.2f} avg_bps={avg_bps:.2f}"
+                f"loss={loss_value:.4f} bps={bps:.2f} avg_bps={avg_bps:.2f}"
             )
             if progress and tqdm is not None:
                 tqdm.write(msg)
@@ -293,4 +338,4 @@ def train_epoch(
                 print(msg, flush=True)
             window_start = now
             window_batches = 0
-    return total_loss / max(n_batches, 1)
+    return total_loss / max(n_updates, 1)

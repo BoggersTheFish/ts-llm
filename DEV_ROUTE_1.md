@@ -9,7 +9,7 @@ Pragmatic path for improving `ts-llm` without destabilizing the core attractor s
   - diffusion + cubic nonlinearity
   - distance-to-proto-attractor logits
 - Focus on reliability, observability, and repeatable quality gains.
-- Defer speculative "Phase 3"-style behavior until baseline metrics are stable.
+- Phase 3 is integrated as default-off controls; preserve strict guards and benchmark parity.
 
 ## Baseline Checklist
 
@@ -39,6 +39,30 @@ Before any model change, verify:
   --eval-every 0 \
   --device cpu
 ```
+
+### Synthetic hierarchy orbit check (new default sanity run)
+
+```bash
+.venv/bin/python run_attractor_llm.py --mode train \
+  --dataset synthetic \
+  --state-dim 512 \
+  --hierarchy-levels 2 \
+  --dynamics multihead \
+  --heads 8 \
+  --seq-len 15 \
+  --synthetic-vocab-size 50 \
+  --synthetic-num-sequences 400 \
+  --epochs 8 \
+  --lr 0.002 \
+  --batch-size 8 \
+  --state-clip 5.0 \
+  --state-norm-min 0.5 \
+  --state-norm-max 3.0 \
+  --state-target-norm 0 \
+  --device cpu
+```
+
+Expected behavior: early repetition collapse before training, then stable cyclic narrative orbits after training.
 
 ### TinyStories bounded run (safe)
 
@@ -105,9 +129,9 @@ Suggested prompts:
 
 ## Immediate Next Candidate Work
 
-1. Add optional periodic throughput logging (batches/sec every N batches).
-2. Add `--seed` propagation to torch training path for reproducible runs.
-3. Add a tiny scripted "benchmark mode" to compare two configs on fixed budget.
+1. Add explicit orbit-quality metrics for synthetic runs (cycle-consistency and repeat-run entropy).
+2. Add stronger benchmark A/B reports (seed-paired variance and repeat-rate rubric).
+3. Add policy-ablation runs comparing controller-only vs self-improve-only vs combined.
 
 ### Benchmark mode (implemented)
 

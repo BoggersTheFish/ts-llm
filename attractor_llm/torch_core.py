@@ -142,6 +142,29 @@ def _clamp_norm(
     return out
 
 
+def _stabilize_state(
+    v: torch.Tensor,
+    floor: float,
+    ceiling: float | None,
+    *,
+    value_clip: float | None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Elementwise clip + norm-band renormalization per last dimension."""
+    out = v
+    if value_clip is not None and value_clip > 0:
+        clip = float(value_clip)
+        out = torch.clamp(out, -clip, clip)
+    if floor <= 0 and ceiling is None:
+        return out
+    n = torch.linalg.vector_norm(out, dim=-1, keepdim=True)
+    if ceiling is None:
+        target = torch.clamp(n, min=max(float(floor), 0.0))
+    else:
+        target = torch.clamp(n, min=max(float(floor), 0.0), max=float(ceiling))
+    return out * (target / (n + eps))
+
+
 def _apply_target_norm(s: torch.Tensor, dim: int, target_norm: float | None) -> torch.Tensor:
     if target_norm is None:
         return s
@@ -169,6 +192,7 @@ def converge_adaptive(
     magnitude_floor: float = 1e-3,
     magnitude_ceiling: float | None = 12.0,
     target_norm: float | None = 1.0,
+    state_clip_value: float | None = None,
 ) -> Tuple[torch.Tensor, int, float]:
     """
     Adaptive convergence (inference-style): stop when incremental norm ``< tol`` or
@@ -185,7 +209,12 @@ def converge_adaptive(
         s_next = step_state(s, diffusion, applied_signal, dt, cubic_scale=cubic_scale)
         delta = float(torch.linalg.vector_norm(s_next - s).item())
         last_delta = delta
-        s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+        s = _stabilize_state(
+            s_next,
+            magnitude_floor,
+            magnitude_ceiling,
+            value_clip=state_clip_value,
+        )
         if delta < tol:
             s = _apply_target_norm(s, dim, target_norm)
             return s, k + 1, last_delta
@@ -204,6 +233,7 @@ def converge_fixed_steps(
     magnitude_floor: float = 1e-3,
     magnitude_ceiling: float | None = 12.0,
     target_norm: float | None = 1.0,
+    state_clip_value: float | None = None,
 ) -> torch.Tensor:
     """
     Fixed ``num_steps`` Euler integration — **fully differentiable** w.r.t. parameters
@@ -224,7 +254,12 @@ def converge_fixed_steps(
             s = initial_state.clone()
         for _ in range(num_steps):
             s_next = step_state(s, diffusion, applied_signal, dt, cubic_scale=cubic_scale)
-            s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+            s = _stabilize_state(
+                s_next,
+                magnitude_floor,
+                magnitude_ceiling,
+                value_clip=state_clip_value,
+            )
         return _apply_target_norm(s, dim, target_norm)
 
     if initial_state is None:
@@ -234,7 +269,12 @@ def converge_fixed_steps(
 
     for _ in range(num_steps):
         s_next = step_state(s, diffusion, applied_signal, dt, cubic_scale=cubic_scale)
-        s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+        s = _stabilize_state(
+            s_next,
+            magnitude_floor,
+            magnitude_ceiling,
+            value_clip=state_clip_value,
+        )
 
     return _apply_target_norm(s, dim, target_norm)
 
@@ -298,6 +338,7 @@ class AttractorDynamics(nn.Module):
         magnitude_floor: float = 1e-3,
         magnitude_ceiling: float | None = 12.0,
         target_norm: float | None = 1.0,
+        state_clip_value: float | None = None,
     ) -> torch.Tensor:
         """
         Fixed-step convergence for training (see :func:`converge_fixed_steps`).
@@ -314,6 +355,7 @@ class AttractorDynamics(nn.Module):
             magnitude_floor=magnitude_floor,
             magnitude_ceiling=magnitude_ceiling,
             target_norm=target_norm,
+            state_clip_value=state_clip_value,
         )
 
     def adaptive_converge(
@@ -326,6 +368,7 @@ class AttractorDynamics(nn.Module):
         magnitude_floor: float = 1e-3,
         magnitude_ceiling: float | None = 12.0,
         target_norm: float | None = 1.0,
+        state_clip_value: float | None = None,
     ) -> Tuple[torch.Tensor, int, float]:
         """Adaptive convergence for inference (see :func:`converge_adaptive`)."""
         return converge_adaptive(
@@ -340,6 +383,7 @@ class AttractorDynamics(nn.Module):
             magnitude_floor=magnitude_floor,
             magnitude_ceiling=magnitude_ceiling,
             target_norm=target_norm,
+            state_clip_value=state_clip_value,
         )
 
     def precompute_attractors(
@@ -464,6 +508,7 @@ class MultiHeadDynamics(nn.Module):
         magnitude_floor: float = 1e-3,
         magnitude_ceiling: float | None = 12.0,
         target_norm: float | None = 1.0,
+        state_clip_value: float | None = None,
     ) -> torch.Tensor:
         """Fixed-step convergence; supports ``signal`` shape ``(D,)`` or ``(V, D)``."""
         if signal.ndim == 2:
@@ -473,14 +518,24 @@ class MultiHeadDynamics(nn.Module):
             s = torch.zeros(v, d, device=signal.device, dtype=signal.dtype) if initial_state is None else initial_state.clone()
             for _ in range(num_steps):
                 s_next = self.forward(s, signal)
-                s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+                s = _stabilize_state(
+                    s_next,
+                    magnitude_floor,
+                    magnitude_ceiling,
+                    value_clip=state_clip_value,
+                )
             return _apply_target_norm(s, d, target_norm)
 
         dim = signal.shape[0]
         s = torch.zeros(dim, device=signal.device, dtype=signal.dtype) if initial_state is None else initial_state.clone()
         for _ in range(num_steps):
             s_next = self.forward(s, signal)
-            s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+            s = _stabilize_state(
+                s_next,
+                magnitude_floor,
+                magnitude_ceiling,
+                value_clip=state_clip_value,
+            )
         return _apply_target_norm(s, dim, target_norm)
 
     def precompute_attractors(
@@ -521,6 +576,7 @@ def neural_ode_converge(
     magnitude_floor: float = 1e-3,
     magnitude_ceiling: float | None = 12.0,
     target_norm: float | None = 1.0,
+    state_clip_value: float | None = None,
 ) -> torch.Tensor:
     """
     Integrate :math:`\\mathrm{d}s/\\mathrm{d}t = f(s,u)` with fixed hold :math:`u` using
@@ -536,6 +592,7 @@ def neural_ode_converge(
             magnitude_floor=magnitude_floor,
             magnitude_ceiling=magnitude_ceiling,
             target_norm=target_norm,
+            state_clip_value=state_clip_value,
         )
 
     try:
@@ -585,7 +642,7 @@ def neural_ode_converge(
             f"Unknown ode_solver {ode_solver!r}; use 'euler', 'rk4', or 'dopri5' (or set adaptive_ode)."
         )
 
-    y = _clamp_norm(y, magnitude_floor, magnitude_ceiling)
+    y = _stabilize_state(y, magnitude_floor, magnitude_ceiling, value_clip=state_clip_value)
     return _apply_target_norm(y, dim, target_norm)
 
 
@@ -618,6 +675,7 @@ class NeuralODEWrapper:
         magnitude_floor: float = 1e-3,
         magnitude_ceiling: float | None = 12.0,
         target_norm: float | None = 1.0,
+        state_clip_value: float | None = None,
     ) -> torch.Tensor:
         return neural_ode_converge(
             dynamics,
@@ -632,4 +690,5 @@ class NeuralODEWrapper:
             magnitude_floor=magnitude_floor,
             magnitude_ceiling=magnitude_ceiling,
             target_norm=target_norm,
+            state_clip_value=state_clip_value,
         )

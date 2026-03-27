@@ -51,8 +51,13 @@ class SelfImproveAdvisor:
         if (not self.config.enabled) or (self.step < self.config.warmup_batches) or len(self.history) < 2:
             return SelfImproveAdvice(active=False, lr_scale=1.0, clip_scale=1.0, rolling_loss=rolling)
 
-        prev = list(self.history)[-2]
-        delta = float(loss_value) - float(prev)
+        history = list(self.history)
+        half = max(len(history) // 2, 1)
+        older = history[:half]
+        newer = history[half:]
+        older_mean = sum(older) / max(len(older), 1)
+        newer_mean = sum(newer) / max(len(newer), 1)
+        delta = float(newer_mean - older_mean)
         strength = max(self.config.strength, 0.0)
         # Loss rising -> reduce lr and tighten clipping. Loss falling -> slightly relax.
         lr_scale = 1.0 - max(min(delta * strength, 0.2), -0.2)

@@ -1,0 +1,14 @@
+Question: what is the thinking system?
+Answer: the thinking system is a stable structure with clear reasoning.
+
+Question: how should a model answer?
+Answer: a model should answer clearly, briefly, and with useful steps.
+
+Question: why does coherence matter?
+Answer: coherence keeps ideas connected and easy to follow.
+
+Question: what is a good final response?
+Answer: a good response gives a short explanation and practical next steps.
+
+Question: how do we improve output quality?
+Answer: improve data quality, test fixed prompts, and measure repetition.

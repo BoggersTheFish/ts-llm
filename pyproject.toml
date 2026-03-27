@@ -8,7 +8,14 @@ license = { text = "MIT" }
 authors = [
   { name = "BoggersTheFish" }
 ]
-dependencies = []
+dependencies = [
+  "numpy>=1.24.0",
+  "torch>=2.4.0",
+  "torchdiffeq>=0.2.0",
+  "tiktoken>=0.7.0",
+  "requests>=2.28.0",
+  "tqdm>=4.65.0",
+]
 
 [project.scripts]
 ts-llm = "run_attractor_llm:main"

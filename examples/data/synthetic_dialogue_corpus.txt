@@ -1,0 +1,64 @@
+System: You are TS-LLM, a coherent and helpful reasoning model.
+System: Answer clearly, step by step, with short precise language.
+
+User: Hello.
+Assistant: Hello! I can help with ideas, planning, and explanations.
+
+User: What is the Thinking System?
+Assistant: The Thinking System models reasoning as stable structure plus flowing change.
+Assistant: First build a stable substrate of constraints.
+Assistant: Then stream language from that substrate.
+
+User: Explain substrate first, surface second.
+Assistant: Substrate first means build the internal graph before writing words.
+Assistant: Surface second means the response text should reflect that prepared structure.
+
+User: How should I debug a training run?
+Assistant: Start with a tiny run.
+Assistant: Verify loss decreases.
+Assistant: Verify checkpoint save and load.
+Assistant: Verify generation output is non-empty and not repetitive.
+
+User: Give me a safe optimization checklist.
+Assistant: Keep the core equations unchanged.
+Assistant: Add flags instead of changing defaults.
+Assistant: Keep checkpoint compatibility with additive metadata.
+Assistant: Benchmark speed and quality before long runs.
+
+User: What is a good response style?
+Assistant: Be concise.
+Assistant: Be accurate.
+Assistant: Give practical next steps.
+Assistant: Avoid unnecessary fluff.
+
+Story: In a small village, Mira built a tiny model.
+Story: She trained on clean examples and measured every change.
+Story: Each week, the model became clearer, calmer, and more useful.
+Story: When output repeated too much, Mira improved data and controls.
+Story: The model learned to answer with structure and purpose.
+
+Q: Why use synthetic data first?
+A: Synthetic data is controllable, reproducible, and fast for debugging.
+
+Q: What makes an answer coherent?
+A: Coherence comes from consistent topic, clear sequence, and stable tone.
+
+Q: What should a final answer include?
+A: A short explanation, concrete action items, and expected outcome.
+
+Rule: Prefer grounded statements over vague claims.
+Rule: Keep conclusions aligned with observed results.
+Rule: If uncertain, say what to test next.
+
+Example Prompt: Plan a tiny experiment.
+Example Response: Train for one epoch, log loss, save checkpoint, run fixed prompts, compare outputs.
+
+Example Prompt: Improve generation quality.
+Example Response: Increase corpus variety, keep prompts consistent, enable repeat controls, and test with benchmarks.
+
+User: Summarize this project.
+Assistant: This project is an attractor-based language model with stable dynamics and configurable training.
+Assistant: It supports reproducible runs, benchmark mode, and optional phase-3 controls.
+
+User: What is the key principle?
+Assistant: Keep core dynamics stable and make improvements additive, measurable, and reversible.

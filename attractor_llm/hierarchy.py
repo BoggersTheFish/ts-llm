@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from attractor_llm.embeddings import LearnableProtoEmbedder
-from attractor_llm.torch_core import MultiHeadDynamics, _apply_target_norm, _clamp_norm
+from attractor_llm.torch_core import MultiHeadDynamics, _apply_target_norm, _stabilize_state
 
 
 def rolling_phrase_id(
@@ -177,6 +177,7 @@ class MultiTimescaleMultiHeadDynamics(nn.Module):
         magnitude_floor: float = 1e-3,
         magnitude_ceiling: float | None = 12.0,
         target_norm: float | None = 1.0,
+        state_clip_value: float | None = None,
     ) -> torch.Tensor:
         """Fixed-step convergence; same contract as :meth:`MultiHeadDynamics.converge_fixed`."""
         if signal.ndim == 2:
@@ -186,14 +187,24 @@ class MultiTimescaleMultiHeadDynamics(nn.Module):
             s = torch.zeros(v, d, device=signal.device, dtype=signal.dtype) if initial_state is None else initial_state.clone()
             for _ in range(num_steps):
                 s_next = self.forward(s, signal)
-                s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+                s = _stabilize_state(
+                    s_next,
+                    magnitude_floor,
+                    magnitude_ceiling,
+                    value_clip=state_clip_value,
+                )
             return _apply_target_norm(s, d, target_norm)
 
         dim = signal.shape[0]
         s = torch.zeros(dim, device=signal.device, dtype=signal.dtype) if initial_state is None else initial_state.clone()
         for _ in range(num_steps):
             s_next = self.forward(s, signal)
-            s = _clamp_norm(s_next, magnitude_floor, magnitude_ceiling)
+            s = _stabilize_state(
+                s_next,
+                magnitude_floor,
+                magnitude_ceiling,
+                value_clip=state_clip_value,
+            )
         return _apply_target_norm(s, dim, target_norm)
 
     def vector_field(self, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:

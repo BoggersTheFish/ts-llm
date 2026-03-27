@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
 from attractor_llm.phase3 import (
     Phase3Adapter,
     Phase3Controller,
     Phase3RuntimeState,
     run_offline_simulation,
+    snapshots_from_dicts,
 )
+from attractor_llm.phase3.config import ConstraintConfig
+from attractor_llm.phase3.constraint_graph import DeterministicConstraintGraph
 
 
 class _DummyOpt:
@@ -61,3 +65,16 @@ def test_phase3_offline_simulation_emits_controls() -> None:
     assert len(results) == 2
     assert results[1].action == "adjust_lr"
     assert results[1].lr < results[0].lr
+
+
+def test_phase3_trace_schema_validation_raises() -> None:
+    with pytest.raises(ValueError, match="missing required keys"):
+        snapshots_from_dicts([{"epoch": 1, "step": 1}])
+
+
+def test_phase3_constraint_graph_penalizes_repeat() -> None:
+    graph = DeterministicConstraintGraph(ConstraintConfig(enabled=True, max_repeat=2, repeat_penalty=1.5))
+    logits = torch.tensor([[0.0, 0.1, 0.2]], dtype=torch.float32)
+    history = torch.tensor([2, 2], dtype=torch.long)
+    adjusted = graph.adjust_logits(logits, history)
+    assert float(adjusted[0, 2].item()) == pytest.approx(float(logits[0, 2].item() - 1.5), rel=1e-6)

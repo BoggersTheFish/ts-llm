@@ -67,15 +67,15 @@ class Phase3MetricsSnapshot(TypedDict):
     timestamp_s: float
 
 class Phase3Decision(TypedDict):
-    action: Literal["noop", "adjust_lr", "adjust_clip", "enable_constraint"]
-    params: dict[str, float | int | bool]
+    action: Literal["noop", "adjust_lr", "adjust_clip", "set_constraints"]
+    params: dict[str, float | bool]
     reason: str
     ttl_steps: int
 ```
 
 Rules:
 - Decisions must be explicit, typed, and bounded by TTL.
-- Unknown actions are rejected safely as `noop`.
+- Unknown actions fail explicitly (strict adapter semantics).
 - Adapter applies decisions only at step boundaries.
 
 ## Safety Gates
@@ -88,7 +88,7 @@ Rules:
 Runtime guards:
 - Never call backward twice on the same graph path.
 - Detach/clone any persistent snapshots used beyond a step.
-- Disable Phase 3 automatically when NaN/Inf is detected.
+- Disable Phase 3 automatically when NaN/Inf is detected in loss or grad metrics.
 
 ## Evaluation Protocol
 
@@ -114,7 +114,7 @@ Minimum acceptance for enabling wider tests:
 3. **Opt-in prototype**
    - guarded CLI flag path, no default behavior change
 4. **Guarded train integration**
-   - bounded budget and fallback path; benchmarked against baseline
+   - bounded budget with strict actions; benchmarked against baseline
 
 ## Failure Modes and Mitigations
 

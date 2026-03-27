@@ -66,6 +66,10 @@ class TorchAttractorLanguageModel(nn.Module):
         phrase_vocab_size: int = 8192,
         phrase_span: int = 4,
         phrase_attractors: bool = True,
+        state_clip_value: float | None = 5.0,
+        state_norm_floor: float = 0.5,
+        state_norm_ceiling: float | None = 3.0,
+        state_target_norm: float | None = None,
     ) -> None:
         super().__init__()
         self.state_dim = state_dim
@@ -78,6 +82,10 @@ class TorchAttractorLanguageModel(nn.Module):
         self._phrase_vocab_size = int(phrase_vocab_size)
         self._phrase_span = int(phrase_span)
         self._phrase_attractors = bool(phrase_attractors)
+        self._state_clip_value = float(state_clip_value) if state_clip_value is not None else None
+        self._state_norm_floor = float(state_norm_floor)
+        self._state_norm_ceiling = float(state_norm_ceiling) if state_norm_ceiling is not None else None
+        self._state_target_norm = float(state_target_norm) if state_target_norm is not None else None
         self.ode = NeuralODEWrapper(
             ode_solver=ode_solver,
             adaptive_ode=adaptive_ode,
@@ -204,6 +212,10 @@ class TorchAttractorLanguageModel(nn.Module):
             initial_state,
             num_steps=num_steps,
             dt=self._dynamics_dt(),
+            magnitude_floor=self._state_norm_floor,
+            magnitude_ceiling=self._state_norm_ceiling,
+            target_norm=self._state_target_norm,
+            state_clip_value=self._state_clip_value,
         )
 
     def _precompute_attractors(self, num_steps: int) -> torch.Tensor:
@@ -320,6 +332,8 @@ class TorchAttractorLanguageModel(nn.Module):
         *,
         num_converge_steps: int | None = None,
         num_attractor_steps: int | None = None,
+        sampling: str = "argmax",
+        sample_temperature: float = 0.75,
         logits_adjust_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     ) -> str:
         """Greedy generation from distance logits; decodes with tokenizer when set."""
@@ -352,7 +366,14 @@ class TorchAttractorLanguageModel(nn.Module):
             logits = self.logits_from_state(state, attractors)
             if logits_adjust_fn is not None:
                 logits = logits_adjust_fn(logits, seq_tensor)
-            nxt = int(logits.argmax(dim=-1).item())
+            if sampling == "multinomial":
+                temp = max(float(sample_temperature), 1e-6)
+                probs = F.softmax(logits / temp, dim=-1)
+                nxt = int(torch.multinomial(probs.squeeze(0), num_samples=1).item())
+            elif sampling == "argmax":
+                nxt = int(logits.argmax(dim=-1).item())
+            else:
+                raise ValueError(f"Unknown sampling mode {sampling!r}; use 'argmax' or 'multinomial'.")
             out_ids.append(nxt)
             seq_tensor = torch.cat([seq_tensor, torch.tensor([nxt], device=device, dtype=torch.long)])
             t = int(seq_tensor.numel()) - 1
@@ -381,6 +402,10 @@ class TorchAttractorLanguageModel(nn.Module):
             "phrase_vocab_size": self._phrase_vocab_size,
             "phrase_span": self._phrase_span,
             "phrase_attractors": self._phrase_attractors,
+            "state_clip_value": self._state_clip_value,
+            "state_norm_floor": self._state_norm_floor,
+            "state_norm_ceiling": self._state_norm_ceiling,
+            "state_target_norm": self._state_target_norm,
         }
         if isinstance(self.dynamics, MultiTimescaleMultiHeadDynamics):
             d["cubic_scale"] = float(self.dynamics.fast.cubic_scale.detach().cpu().item())

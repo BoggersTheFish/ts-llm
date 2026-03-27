@@ -26,6 +26,14 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHel
     """Formatter combining default-value help and raw multiline examples."""
 
 
+def _bounded_scale(raw_scale: float, max_step_delta: float) -> float:
+    """Clamp multiplicative step scale around 1.0 by max allowed delta."""
+    delta = max(float(max_step_delta), 0.0)
+    lo = max(0.0, 1.0 - delta)
+    hi = 1.0 + delta
+    return min(max(float(raw_scale), lo), hi)
+
+
 def _batch_token_count(batch_ids: object) -> int:
     """Count token IDs in a potentially nested batch payload.
 
@@ -193,6 +201,11 @@ def _run_train(args: argparse.Namespace) -> None:
         if hasattr(torch.backends, "cudnn"):
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
     def _seed_worker(worker_id: int) -> None:
         worker_seed = int(args.seed) + int(worker_id)
@@ -237,6 +250,34 @@ def _run_train(args: argparse.Namespace) -> None:
             max_files=args.tinystories_max_files,
             max_tokens=args.tinystories_max_tokens,
             max_windows=args.tinystories_max_windows,
+        )
+        if len(val_ds) > 0:
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=args.batch_size,
+                shuffle=False,
+                drop_last=False,
+                worker_init_fn=_seed_worker,
+                generator=loader_generator,
+            )
+    elif args.dataset == "synthetic":
+        from attractor_llm.datasets import SyntheticStoriesDataset
+
+        train_ds = SyntheticStoriesDataset(
+            split="train",
+            val_split=args.val_split,
+            seq_len=args.seq_len,
+            vocab_size=args.synthetic_vocab_size,
+            num_sequences=args.synthetic_num_sequences,
+            seed=args.seed,
+        )
+        val_ds = SyntheticStoriesDataset(
+            split="val",
+            val_split=args.val_split,
+            seq_len=args.seq_len,
+            vocab_size=args.synthetic_vocab_size,
+            num_sequences=args.synthetic_num_sequences,
+            seed=args.seed,
         )
         if len(val_ds) > 0:
             val_loader = DataLoader(
@@ -328,8 +369,8 @@ def _run_train(args: argparse.Namespace) -> None:
         if ckpt.get("optimizer_state") is not None:
             try:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                logger.warning("Could not load optimizer state from checkpoint: %s", exc)
     else:
         ode_solver = args.ode_solver or "euler"
         model = TorchAttractorLanguageModel(
@@ -348,6 +389,10 @@ def _run_train(args: argparse.Namespace) -> None:
             phrase_vocab_size=args.phrase_vocab_size,
             phrase_span=args.phrase_span,
             phrase_attractors=not args.no_phrase_attractors,
+            state_clip_value=(args.state_clip if args.state_clip > 0 else None),
+            state_norm_floor=args.state_norm_min,
+            state_norm_ceiling=(args.state_norm_max if args.state_norm_max > 0 else None),
+            state_target_norm=(args.state_target_norm if args.state_target_norm > 0 else None),
         ).to(device)
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
@@ -371,8 +416,9 @@ def _run_train(args: argparse.Namespace) -> None:
         )
     )
     phase3_start_s = perf_counter()
-    phase3_trace_path = out_dir / "phase3_trace.jsonl"
+    phase3_trace_path = Path(args.phase3_trace)
     if args.phase3:
+        phase3_trace_path.parent.mkdir(parents=True, exist_ok=True)
         phase3_trace_path.write_text("", encoding="utf-8")
 
     if args.phase3 and args.phase3_constraints:
@@ -390,6 +436,15 @@ def _run_train(args: argparse.Namespace) -> None:
     def _on_batch_end(metrics: TrainBatchMetrics) -> None:
         if not args.phase3:
             return
+        if metrics.non_finite_detected:
+            phase3_controller.enabled = False
+            phase3_advisor.config.enabled = False
+            logger.warning(
+                "[phase3] disabled due to non-finite metric at epoch=%s step=%s",
+                metrics.epoch,
+                metrics.step,
+            )
+            return
         elapsed = perf_counter() - phase3_start_s
         if args.phase3_budget_seconds > 0 and elapsed >= float(args.phase3_budget_seconds):
             return
@@ -404,31 +459,52 @@ def _run_train(args: argparse.Namespace) -> None:
         }
         with phase3_trace_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(snapshot, sort_keys=True) + "\n")
+
         decision = phase3_controller.decide(snapshot)
-        apply_result = phase3_adapter.apply(decision, optimizer=optimizer, runtime=phase3_runtime)
+        decision_message = "noop"
+        requested_lr_scale = 1.0
+        requested_clip_scale = 1.0
+        if decision["action"] == "adjust_lr":
+            requested_lr_scale = float(decision["params"].get("lr_scale", 1.0))
+            decision_message = "controller_adjust_lr"
+        elif decision["action"] == "adjust_clip":
+            requested_clip_scale = float(decision["params"].get("clip_scale", 1.0))
+            decision_message = "controller_adjust_clip"
+        elif decision["action"] == "set_constraints":
+            apply_result = phase3_adapter.apply(decision, optimizer=optimizer, runtime=phase3_runtime)
+            decision_message = apply_result.message
 
         advice = phase3_advisor.observe(float(metrics.train_loss))
         if advice.active:
-            phase3_adapter.apply(
+            requested_lr_scale *= float(advice.lr_scale)
+            requested_clip_scale *= float(advice.clip_scale)
+
+        bounded_lr_scale = _bounded_scale(requested_lr_scale, args.phase3_max_lr_step_delta)
+        bounded_clip_scale = _bounded_scale(requested_clip_scale, args.phase3_max_clip_step_delta)
+        if abs(bounded_lr_scale - 1.0) > 1e-9:
+            lr_result = phase3_adapter.apply(
                 {
                     "action": "adjust_lr",
-                    "params": {"lr_scale": float(advice.lr_scale)},
-                    "reason": "self_improve_lr",
+                    "params": {"lr_scale": bounded_lr_scale},
+                    "reason": "governed_step_lr",
                     "ttl_steps": 1,
                 },
                 optimizer=optimizer,
                 runtime=phase3_runtime,
             )
-            phase3_adapter.apply(
+            decision_message = lr_result.message
+        if abs(bounded_clip_scale - 1.0) > 1e-9:
+            clip_result = phase3_adapter.apply(
                 {
                     "action": "adjust_clip",
-                    "params": {"clip_scale": float(advice.clip_scale)},
-                    "reason": "self_improve_clip",
+                    "params": {"clip_scale": bounded_clip_scale},
+                    "reason": "governed_step_clip",
                     "ttl_steps": 1,
                 },
                 optimizer=optimizer,
                 runtime=phase3_runtime,
             )
+            decision_message = clip_result.message
 
         if args.log_every_batches > 0 and metrics.step % args.log_every_batches == 0:
             logger.info(
@@ -436,7 +512,7 @@ def _run_train(args: argparse.Namespace) -> None:
                 metrics.epoch,
                 metrics.step,
                 decision["action"],
-                apply_result.message,
+                decision_message,
                 float(optimizer.param_groups[0]["lr"]),
                 float(phase3_runtime.clip_scale),
             )
@@ -533,6 +609,17 @@ def _run_benchmark(args: argparse.Namespace) -> None:
             max_tokens=args.tinystories_max_tokens,
             max_windows=args.tinystories_max_windows,
         )
+    elif args.dataset == "synthetic":
+        from attractor_llm.datasets import SyntheticStoriesDataset
+
+        train_ds = SyntheticStoriesDataset(
+            split="train",
+            val_split=max(args.val_split, 0.1),
+            seq_len=args.seq_len,
+            vocab_size=args.synthetic_vocab_size,
+            num_sequences=args.synthetic_num_sequences,
+            seed=args.seed,
+        )
     else:
         data_path = Path(args.data_file)
         train_ds = TextDataset(
@@ -588,6 +675,10 @@ def _run_benchmark(args: argparse.Namespace) -> None:
             phrase_vocab_size=args.phrase_vocab_size,
             phrase_span=args.phrase_span,
             phrase_attractors=not args.no_phrase_attractors,
+            state_clip_value=(args.state_clip if args.state_clip > 0 else None),
+            state_norm_floor=args.state_norm_min,
+            state_norm_ceiling=(args.state_norm_max if args.state_norm_max > 0 else None),
+            state_target_norm=(args.state_target_norm if args.state_target_norm > 0 else None),
         ).to(device)
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
         stream = cycle(loader)
@@ -668,7 +759,7 @@ def _run_torch_generate(args: argparse.Namespace) -> None:
         model.ode.ode_solver = args.ode_solver
     constraint_graph = DeterministicConstraintGraph(
         ConstraintConfig(
-            enabled=bool(args.phase3 and args.phase3_constraints),
+            enabled=bool(args.phase3_constraints),
             max_repeat=max(args.phase3_max_repeat, 1),
             repeat_penalty=max(float(args.phase3_repeat_penalty), 0.0),
         )
@@ -676,6 +767,8 @@ def _run_torch_generate(args: argparse.Namespace) -> None:
     text = model.generate(
         args.prompt,
         max_tokens=args.max_tokens,
+        sampling=args.sampling,
+        sample_temperature=args.sample_temperature,
         logits_adjust_fn=constraint_graph.adjust_logits if constraint_graph.config.enabled else None,
     )
     print(text)
@@ -693,12 +786,20 @@ def _run_phase3_simulation(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     rows: list[dict[str, Any]] = []
-    for raw in trace_path.read_text(encoding="utf-8").splitlines():
+    for line_no, raw in enumerate(trace_path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw.strip()
         if not line:
             continue
-        rows.append(_json.loads(line))
-    snapshots = snapshots_from_dicts(rows)
+        try:
+            rows.append(_json.loads(line))
+        except _json.JSONDecodeError as exc:
+            print(f"Error: invalid JSON at {trace_path}:{line_no}: {exc}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        snapshots = snapshots_from_dicts(rows)
+    except ValueError as exc:
+        print(f"Error: invalid phase3 trace schema: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     controller = Phase3Controller(enabled=True, budget_steps=max(args.phase3_budget_steps, 0))
     adapter = Phase3Adapter()
@@ -731,6 +832,7 @@ def main() -> None:
             "  ts-llm --mode train --dataset custom --eval-every 1 --plot-loss\n"
             "  ts-llm --mode benchmark --state-dim 64 --benchmark-alt-state-dim 96 --benchmark-steps 200\n"
             "  ts-llm --mode train --phase3 --phase3-self-improve --phase3-budget-steps 200\n"
+            "  ts-llm --mode phase3-sim --phase3-trace checkpoints/phase3_trace.jsonl\n"
             "  ts-llm --config config.yaml --log-level DEBUG --mode train\n"
         ),
         formatter_class=_HelpFormatter,
@@ -821,6 +923,18 @@ def main() -> None:
     p.add_argument("--ode-rtol", type=float, default=1e-4, help="Adaptive solver rtol (torchdiffeq)")
     p.add_argument("--device", type=str, default=None, help="cpu | cuda (default: auto)")
     p.add_argument("--max-tokens", type=int, default=16)
+    p.add_argument(
+        "--sampling",
+        choices=["argmax", "multinomial"],
+        default="argmax",
+        help="Torch generation decoding strategy",
+    )
+    p.add_argument(
+        "--sample-temperature",
+        type=float,
+        default=0.75,
+        help="Temperature for --sampling multinomial (higher = more random)",
+    )
 
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--lr", type=float, default=0.01)
@@ -836,9 +950,21 @@ def main() -> None:
     p.add_argument("--eval-data-file", type=str, default="data/eval.txt", help="Optional eval text (defaults to synthetic if missing)")
     p.add_argument(
         "--dataset",
-        choices=["custom", "tinystories"],
+        choices=["custom", "tinystories", "synthetic"],
         default="custom",
-        help="custom = --data-file or synthetic; tinystories = download after interactive confirmation",
+        help="custom = --data-file/fallback tokens; tinystories = local archive/JSON; synthetic = generated cyclical story tokens",
+    )
+    p.add_argument(
+        "--synthetic-vocab-size",
+        type=int,
+        default=50,
+        help="Synthetic dataset vocabulary width (dataset=synthetic)",
+    )
+    p.add_argument(
+        "--synthetic-num-sequences",
+        type=int,
+        default=400,
+        help="Synthetic dataset number of generated sequences (dataset=synthetic)",
     )
     p.add_argument(
         "--val-split",
@@ -869,6 +995,30 @@ def main() -> None:
     p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     p.add_argument("--eval-every", type=int, default=0, help="Run evaluation every N epochs (0 = disabled)")
     p.add_argument("--grad-clip", type=float, default=1.0, help="Global L2 grad clip (0 = off)")
+    p.add_argument(
+        "--state-clip",
+        type=float,
+        default=5.0,
+        help="Elementwise state clip after each Euler step (<=0 disables)",
+    )
+    p.add_argument(
+        "--state-norm-min",
+        type=float,
+        default=0.5,
+        help="Minimum state norm after each Euler step",
+    )
+    p.add_argument(
+        "--state-norm-max",
+        type=float,
+        default=3.0,
+        help="Maximum state norm after each Euler step (<=0 disables)",
+    )
+    p.add_argument(
+        "--state-target-norm",
+        type=float,
+        default=0.0,
+        help="Optional final norm projection after convergence (<=0 disables)",
+    )
     p.add_argument(
         "--plot-loss",
         action="store_true",
@@ -916,6 +1066,18 @@ def main() -> None:
         help="Hard wall-clock cap for Phase 3 decision making in each run (0 = unlimited).",
     )
     p.add_argument(
+        "--phase3-max-lr-step-delta",
+        type=float,
+        default=0.15,
+        help="Per-step governor cap for LR scale around 1.0 (0.15 => [0.85, 1.15]).",
+    )
+    p.add_argument(
+        "--phase3-max-clip-step-delta",
+        type=float,
+        default=0.12,
+        help="Per-step governor cap for clip scale around 1.0 (0.12 => [0.88, 1.12]).",
+    )
+    p.add_argument(
         "--phase3-self-improve",
         action="store_true",
         help="Enable detached loss-trend advisor for LR/clip scaling.",
@@ -926,7 +1088,7 @@ def main() -> None:
     p.add_argument(
         "--phase3-constraints",
         action="store_true",
-        help="Enable deterministic repeat-penalty constraints during torch generation.",
+        help="Enable deterministic repeat-penalty constraints during torch generation (works without --phase3).",
     )
     p.add_argument("--phase3-max-repeat", type=int, default=3, help="Max consecutive token repeats before penalty.")
     p.add_argument(
@@ -935,7 +1097,12 @@ def main() -> None:
         default=0.35,
         help="Logit penalty applied to excessive repeated token during generation.",
     )
-    p.add_argument("--phase3-trace", type=str, default="phase3_trace.jsonl", help="JSONL trace for --mode phase3-sim.")
+    p.add_argument(
+        "--phase3-trace",
+        type=str,
+        default="checkpoints/phase3_trace.jsonl",
+        help="JSONL trace path used by training (when --phase3) and by --mode phase3-sim replay.",
+    )
     p.add_argument("--phase3-base-lr", type=float, default=0.001, help="Base LR used for offline --mode phase3-sim.")
     p.add_argument("--no-reset", action="store_true")
     p.add_argument("--candidates", type=str, default="")

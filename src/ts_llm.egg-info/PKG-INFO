@@ -1,3 +1,20 @@
+Metadata-Version: 2.4
+Name: ts-llm
+Version: 0.5.0
+Summary: Dynamical language substrate based on nonlinear attractor dynamics.
+Author: BoggersTheFish
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: torch>=2.4.0
+Requires-Dist: torchdiffeq>=0.2.0
+Requires-Dist: tiktoken>=0.7.0
+Requires-Dist: requests>=2.28.0
+Requires-Dist: tqdm>=4.65.0
+Dynamic: license-file
+
 # ts-llm
 
 **Version 0.5.0** — see [CHANGELOG.md](CHANGELOG.md) for release history.
@@ -88,18 +105,6 @@ mkdir -p data checkpoints
 .venv/bin/python run_attractor_llm.py --mode train --epochs 5 --lr 0.01 --eval-every 1 --seq-len 16 --grad-clip 1.0
 ```
 
-### Synthetic story orbit sandbox (fast local check)
-
-Use `--dataset synthetic` to run the built-in cyclical toy corpus (no external files).
-
-```bash
-.venv/bin/python run_attractor_llm.py --mode train --dataset synthetic \
-  --state-dim 512 --hierarchy-levels 2 --dynamics multihead --heads 8 \
-  --seq-len 15 --synthetic-vocab-size 50 --synthetic-num-sequences 400 \
-  --epochs 8 --lr 0.002 --batch-size 8 \
-  --state-clip 5.0 --state-norm-min 0.5 --state-norm-max 3.0
-```
-
 **Train/validation split (custom data):** use `--val-split 0.1` to hold out 10% of the token stream for validation (same file as `--data-file`). When `--val-split` is `0` (default), behavior matches earlier releases: training uses the full corpus, and optional `--eval-data-file` can supply a separate eval text if present.
 
 ### Using TinyStories (local archive or extracted JSON)
@@ -140,23 +145,6 @@ Checkpoints are written under **`checkpoints/`** (see `.gitignore`).
 .venv/bin/python run_attractor_llm.py "hello world" --checkpoint checkpoints/attractor_llm_final.pt --max-tokens 20
 ```
 
-Use multinomial sampling for less deterministic continuations:
-
-```bash
-.venv/bin/python run_attractor_llm.py "hero quest dragon" \
-  --checkpoint checkpoints/attractor_llm_final.pt \
-  --sampling multinomial --sample-temperature 0.75 --max-tokens 40
-```
-
-### Stabilization controls (Torch convergence)
-
-The torch path now supports explicit state stabilization after each Euler step:
-
-- elementwise clip: `--state-clip` (default `5.0`)
-- norm floor: `--state-norm-min` (default `0.5`)
-- norm ceiling: `--state-norm-max` (default `3.0`)
-- optional final norm projection: `--state-target-norm` (default `0` = disabled)
-
 ### CLI reference (selection)
 
 | Flag | Role |
@@ -178,20 +166,13 @@ The torch path now supports explicit state stabilization after each Euler step:
 | `--vocab-cap` | Max token id + 1 for embedding / logits |
 | `--no-tiktoken` | Word-list tokenizer |
 | `--eval-every` | Run `evaluate()` every *N* epochs (0 = off) |
-| `--dataset` | `custom` (default), `tinystories` (local archive/JSON), or `synthetic` (generated cyclical stories) |
-| `--synthetic-vocab-size` | Synthetic dataset vocabulary width (default **50**) |
-| `--synthetic-num-sequences` | Synthetic dataset generated sequence count (default **400**) |
+| `--dataset` | `custom` (default) or `tinystories` (local archive/JSON under `data/tinystories`) |
 | `--val-split` | Fraction of tokens for validation (`0` = off; use e.g. `0.1` with TinyStories) |
 | `--tinystories-max-files` | Optional cap on TinyStories JSON shard files loaded |
 | `--tinystories-max-tokens` | Max tokens to load (0 = unlimited; default 500000) |
 | `--tinystories-max-windows` | Max sliding windows per train/val split per epoch (0 = unlimited; default 2048) |
 | `--eval-data-file` | Optional eval text when `--val-split` is 0 (defaults to synthetic if missing) |
 | `--grad-clip` | Global L2 clip (0 disables) |
-| `--state-clip` | Elementwise post-step state clamp (<=0 disables) |
-| `--state-norm-min` / `--state-norm-max` | Post-step norm band renormalization range |
-| `--state-target-norm` | Optional final norm projection after convergence (<=0 disables) |
-| `--sampling` | Torch decode mode: `argmax` (default) or `multinomial` |
-| `--sample-temperature` | Temperature for multinomial sampling (default `0.75`) |
 | `--train-progress` / `--no-train-progress` | Per-batch tqdm bar during training (default: on; useful on slow CPUs) |
 | `--phase3`, `--phase3-self-improve`, `--phase3-budget-*` | Enable bounded train-time Phase 3 control loop |
 | `--phase3-constraints`, `--phase3-max-repeat`, `--phase3-repeat-penalty` | Deterministic torch-generation repeat control |

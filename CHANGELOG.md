@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Planned
 
 - Phase 3: self-improvement loop, constraint graphs.
-- Phase 3 specification contract added in `PHASE_3_SPEC.md` with isolated controller/adapter boundaries, explicit rollout stages, and safety gates (spec-only, no default behavior change).
+- Phase 3 policy quality improvements and expanded A/B evaluation.
 
 ### Added
 
@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Integrated opt-in Phase 3 runtime controls for training and generation (`--phase3`, `--phase3-self-improve`, `--phase3-constraints`) with bounded decision budgets.
 - Added offline Phase 3 simulation harness (`--mode phase3-sim`) for replaying JSONL metrics traces through controller/adapter logic.
 - Added strict adapter behavior for Phase 3 decisions (invalid/unknown actions now fail explicitly instead of fallback).
+- Added per-step Phase 3 governor caps to bound LR/clip adjustments when controller and self-improve are both active.
+- Added shared `--phase3-trace` path semantics for training trace emission and offline `phase3-sim` replay.
+- Added optional synthetic cyclical story dataset (`--dataset synthetic`) for quick no-download training checks with `--synthetic-vocab-size` and `--synthetic-num-sequences`.
+- Added torch generation sampling controls: `--sampling {argmax,multinomial}` and `--sample-temperature`.
+- Added explicit convergence stabilization controls for torch models: `--state-clip`, `--state-norm-min`, `--state-norm-max`, and `--state-target-norm`.
 
 ### Fixed
 
@@ -32,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkpoint loading is more backward-compatible when older checkpoints are missing newer config fields.
 - `TextDataset` no longer returns negative length on very short custom text; tiny corpora are padded to minimum sliding-window size.
 - Checkpoint loading now restores tokenizer config when available and safely handles optional numeric config fields stored as `null`.
+- `phase3-sim` now validates malformed JSON/trace schema with clear error messages.
+- Benchmark mode now honors `--deterministic` for seed-paired reproducibility.
+- TinyStories loader now runs without hard dependency on tqdm (graceful fallback).
 
 ## [0.5.0] — 2026-03-25
 

@@ -12,13 +12,63 @@ from pathlib import Path
 from typing import Any
 
 from torch.utils.data import Dataset
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - optional dependency fallback
+    def tqdm(iterable: Any, **_: Any) -> Any:
+        return iterable
 
 from .tokenizer import AttractorTokenizer
 
 # One full token stream per (tokenizer settings, file cap, token cap). Avoids loading
 # the corpus twice when constructing train + val splits.
 _IDS_CACHE: dict[tuple[Any, ...], list[int]] = {}
+
+
+def generate_synthetic_story_token_ids(
+    *,
+    vocab_size: int = 50,
+    num_sequences: int = 400,
+    seq_len: int = 15,
+    seed: int = 42,
+) -> list[int]:
+    """Generate compact cyclical token streams for quick local training tests.
+
+    The stream mixes repeated motif cycles with occasional crossovers and sparse
+    low-id padding/noise tokens, producing a small corpus that trains quickly on CPU.
+    """
+    import random
+
+    rng = random.Random(seed)
+    motifs = [
+        [10, 11, 12, 13, 14, 15],
+        [20, 21, 22, 23, 24, 25],
+        [30, 31, 32, 33, 34, 35],
+        [40, 41, 42, 43, 44, 45],
+    ]
+    if vocab_size <= 1:
+        return [0] * max(num_sequences * (seq_len + 2), 2)
+
+    stream: list[int] = []
+    for _ in range(max(num_sequences, 1)):
+        primary = motifs[rng.randrange(len(motifs))]
+        secondary = motifs[rng.randrange(len(motifs))]
+        start = rng.randrange(len(primary))
+        seq: list[int] = []
+        for t in range(max(seq_len, 2) + 1):
+            base = primary[(start + t) % len(primary)]
+            if t > 0 and t % 5 == 0 and rng.random() < 0.45:
+                base = secondary[(start + t) % len(secondary)]
+            if rng.random() < 0.08:
+                base = rng.randrange(0, min(vocab_size, 10))
+            seq.append(int(base % vocab_size))
+        stream.extend(seq)
+        # Light separator to avoid a single monolithic cycle.
+        stream.append(rng.randrange(0, min(vocab_size, 6)))
+
+    if len(stream) < 2:
+        stream = stream + [0] * (2 - len(stream))
+    return stream
 
 
 def _tokenizer_key(tokenizer: AttractorTokenizer) -> tuple[Any, ...]:
@@ -209,6 +259,44 @@ class TinyStoriesDataset(Dataset):
         if len(self.ids) < self.seq_len + 1:
             pad = self.seq_len + 1 - len(self.ids)
             self.ids = self.ids + [0] * pad
+
+    def __len__(self) -> int:
+        return max(0, len(self.ids) - self.seq_len)
+
+    def __getitem__(self, idx: int) -> tuple[list[int], list[int]]:
+        x = self.ids[idx : idx + self.seq_len]
+        y = self.ids[idx + 1 : idx + self.seq_len + 1]
+        return x, y
+
+
+class SyntheticStoriesDataset(Dataset):
+    """Sliding-window dataset over generated cyclical synthetic token stories."""
+
+    def __init__(
+        self,
+        *,
+        split: str = "train",
+        val_split: float = 0.1,
+        seq_len: int = 15,
+        vocab_size: int = 50,
+        num_sequences: int = 400,
+        seed: int = 42,
+    ) -> None:
+        if split not in ("train", "val"):
+            raise ValueError("split must be 'train' or 'val'")
+        if not 0.0 <= val_split < 1.0:
+            raise ValueError("val_split must be in [0, 1)")
+        self.seq_len = int(seq_len)
+        ids = generate_synthetic_story_token_ids(
+            vocab_size=int(vocab_size),
+            num_sequences=int(num_sequences),
+            seq_len=int(seq_len),
+            seed=int(seed),
+        )
+        split_idx = int(len(ids) * (1.0 - val_split))
+        self.ids = ids[:split_idx] if split == "train" else ids[split_idx:]
+        if len(self.ids) < self.seq_len + 1:
+            self.ids = self.ids + [0] * (self.seq_len + 1 - len(self.ids))
 
     def __len__(self) -> int:
         return max(0, len(self.ids) - self.seq_len)

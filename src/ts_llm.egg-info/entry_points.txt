@@ -1,0 +1,2 @@
+[console_scripts]
+ts-llm = run_attractor_llm:main

@@ -72,18 +72,29 @@ def run_offline_simulation(
 
 
 def snapshots_from_dicts(rows: list[dict[str, Any]]) -> list[Phase3MetricsSnapshot]:
-    """Convert loose dict rows into typed snapshots for replay convenience."""
+    """Convert loose dict rows into typed snapshots for replay convenience.
+
+    Raises:
+        ValueError: If required keys are missing or cannot be coerced.
+    """
     snapshots: list[Phase3MetricsSnapshot] = []
-    for row in rows:
-        snapshots.append(
-            {
-                "epoch": int(row["epoch"]),
-                "step": int(row["step"]),
-                "train_loss": float(row["train_loss"]),
-                "val_loss": None if row.get("val_loss") is None else float(row["val_loss"]),
-                "steps_per_sec": float(row.get("steps_per_sec", 0.0)),
-                "grad_norm": None if row.get("grad_norm") is None else float(row["grad_norm"]),
-                "timestamp_s": float(row.get("timestamp_s", 0.0)),
-            }
-        )
+    required = ("epoch", "step", "train_loss")
+    for idx, row in enumerate(rows, start=1):
+        missing = [k for k in required if k not in row]
+        if missing:
+            raise ValueError(f"row {idx} missing required keys: {', '.join(missing)}")
+        try:
+            snapshots.append(
+                {
+                    "epoch": int(row["epoch"]),
+                    "step": int(row["step"]),
+                    "train_loss": float(row["train_loss"]),
+                    "val_loss": None if row.get("val_loss") is None else float(row["val_loss"]),
+                    "steps_per_sec": float(row.get("steps_per_sec", 0.0)),
+                    "grad_norm": None if row.get("grad_norm") is None else float(row["grad_norm"]),
+                    "timestamp_s": float(row.get("timestamp_s", 0.0)),
+                }
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"row {idx} has invalid numeric values") from exc
     return snapshots
