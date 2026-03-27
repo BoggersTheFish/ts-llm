@@ -11,3 +11,8 @@ checkpoints/tinystories/
 tsos_episodes.json
 benchmark_table.md
 human_blind_stories.json
+
+# TinyStories: never commit the archive or extracted shards (~7GB+). Download locally.
+data/tinystories/extracted/
+data/tinystories/*.tar.gz
+data/tinystories/*.tar

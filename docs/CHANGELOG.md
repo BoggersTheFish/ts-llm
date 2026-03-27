@@ -149,3 +149,21 @@ PYTHONPATH=. python scripts/plot_limit_cycle_orbit.py
 - **`text_dataloader` inner class:** `Dataset` subclass now stores list in `__init__` (fixes `TypeError`).
 
 **Commit message:** `feat(attractor): scaffold Phases 0–7 (ts_attractor, scripts, docs, tests; no heavy runs)`
+
+### 2026-03-27T16:15:00 — Repo diet: remove huge TinyStories blobs + safe push
+
+**Problem:** `.git` had grown to **~7GB** (tracked `data/tinystories/extracted/*.json` ~140MB each + `TinyStories_all_data.tar.gz` ~1.6GB). `git push` **pack-objects** compressed gigabytes of data and pegged CPU/RAM on a laptop.
+
+**Resolution:**
+
+1. **`git filter-repo`** (in venv): `--invert-paths` for `data/tinystories/extracted` and `data/tinystories/TinyStories_all_data.tar.gz` — removed from **all commits**. After rewrite: `.git` **~1MB**, `size-pack` **~350 KiB**.
+2. **`.gitignore`** updated so those paths are never committed again.
+3. **`data/tinystories/README.md`** — how to download/extract locally.
+4. **`scripts/push_safe.sh`** — `pack.compression=0`, `pack.threads=1` for future pushes.
+5. **`CONTRIBUTING.md`** — push section.
+
+**Remote:** `origin` was re-added after `filter-repo` (it strips remotes by default).
+
+**Push:** Because history was rewritten, use **`git push --force-with-lease origin dev_route_1_attractor_v1`** (not a plain `git push` if the branch existed on GitHub with old hashes).
+
+**Commit message:** `fix(repo): strip TinyStories blobs from history, add push_safe.sh`

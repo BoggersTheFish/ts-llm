@@ -29,6 +29,18 @@ RUN_HEAVY_TESTS=1 .venv/bin/pytest  # long-running / large-dim stress tests
 
 Heavy tests are **opt-in** so laptops and CI stay responsive.
 
+## Pushing without melting your laptop
+
+TinyStories archives and extracted JSON shards **must not** be committed (they were removed from Git history). See [`data/tinystories/README.md`](data/tinystories/README.md).
+
+Use low-compression, single-threaded push:
+
+```bash
+./scripts/push_safe.sh -u origin dev_route_1_attractor_v1
+```
+
+Or once: `git config --global pack.compression 0` and `git config --global pack.threads 1`.
+
 ## Style
 
 - Match existing typing and module layout.
