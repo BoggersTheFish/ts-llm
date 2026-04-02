@@ -431,8 +431,8 @@ class MultiHeadDynamics(nn.Module):
         if d != self.state_dim or signal.shape != state.shape:
             raise ValueError("state and signal must match (B, D) or (D,)")
 
-        heads = state.view(b, self.num_heads, self.head_dim)
-        sig = signal.view(b, self.num_heads, self.head_dim)
+        heads = state.reshape(b, self.num_heads, self.head_dim)
+        sig = signal.reshape(b, self.num_heads, self.head_dim)
         a = torch.matmul(self.U, self.V) + torch.diag_embed(self.diag)
         c = heads - heads.mean(dim=-1, keepdim=True)
         nl = self.cubic_scale * (c**3)
@@ -442,7 +442,7 @@ class MultiHeadDynamics(nn.Module):
         mean_h = drift_h.mean(dim=1, keepdim=True)
         drift_h = drift_h + self.coupling * (drift_h - mean_h)
 
-        out = drift_h.view(b, d)
+        out = drift_h.reshape(b, d)
         return out.squeeze(0) if squeeze else out
 
     def vector_field(self, state: torch.Tensor, signal: torch.Tensor) -> torch.Tensor:
