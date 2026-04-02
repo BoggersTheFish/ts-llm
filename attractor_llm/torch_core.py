@@ -433,13 +433,11 @@ class MultiHeadDynamics(nn.Module):
 
         heads = state.view(b, self.num_heads, self.head_dim)
         sig = signal.view(b, self.num_heads, self.head_dim)
-        drift_h = torch.zeros_like(heads)
-
-        for h in range(self.num_heads):
-            a_h = self.U[h] @ self.V[h] + torch.diag(self.diag[h])
-            c = heads[:, h] - heads[:, h].mean(dim=-1, keepdim=True)
-            nl = self.cubic_scale * (c**3)
-            drift_h[:, h] = torch.matmul(heads[:, h], a_h.T) + nl + sig[:, h]
+        a = torch.matmul(self.U, self.V) + torch.diag_embed(self.diag)
+        c = heads - heads.mean(dim=-1, keepdim=True)
+        nl = self.cubic_scale * (c**3)
+        lin = torch.einsum("bhd,hde->bhe", heads, a)
+        drift_h = lin + nl + sig
 
         mean_h = drift_h.mean(dim=1, keepdim=True)
         drift_h = drift_h + self.coupling * (drift_h - mean_h)
