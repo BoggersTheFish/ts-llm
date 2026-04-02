@@ -22,6 +22,9 @@ where :math:`(\\cdot)^{\\odot 3}` is the element-wise cube.
 from __future__ import annotations
 
 import hashlib
+import json
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Tuple
 
 import torch
@@ -29,6 +32,28 @@ import torch.nn as nn
 
 if TYPE_CHECKING:
     from attractor_llm.embeddings import LearnableProtoEmbedder
+
+# #region agent log
+_AGENT_DEBUG_LOG_PATH = Path("/home/boggersthefish/BoggersTheLLM/.cursor/debug-b56157.log")
+_AGENT_DEBUG_KEYS: set[str] = set()
+
+
+def _agent_debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+    try:
+        payload = {
+            "sessionId": "b56157",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _AGENT_DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+# #endregion
 
 
 def text_to_signal(
@@ -430,6 +455,25 @@ class MultiHeadDynamics(nn.Module):
         b, d = state.shape
         if d != self.state_dim or signal.shape != state.shape:
             raise ValueError("state and signal must match (B, D) or (D,)")
+        # #region agent log
+        if "mhd_drift_entry" not in _AGENT_DEBUG_KEYS:
+            _AGENT_DEBUG_KEYS.add("mhd_drift_entry")
+            _agent_debug_log(
+                run_id="pre-fix",
+                hypothesis_id="H1",
+                location="torch_core.py:423",
+                message="MultiHeadDynamics.drift entry",
+                data={
+                    "file": __file__,
+                    "state_shape": list(state.shape),
+                    "signal_shape": list(signal.shape),
+                    "state_contiguous": bool(state.is_contiguous()),
+                    "signal_contiguous": bool(signal.is_contiguous()),
+                    "num_heads": int(self.num_heads),
+                    "head_dim": int(self.head_dim),
+                },
+            )
+        # #endregion
 
         heads = state.reshape(b, self.num_heads, self.head_dim)
         sig = signal.reshape(b, self.num_heads, self.head_dim)
@@ -441,6 +485,22 @@ class MultiHeadDynamics(nn.Module):
 
         mean_h = drift_h.mean(dim=1, keepdim=True)
         drift_h = drift_h + self.coupling * (drift_h - mean_h)
+        # #region agent log
+        if "mhd_drift_layout" not in _AGENT_DEBUG_KEYS:
+            _AGENT_DEBUG_KEYS.add("mhd_drift_layout")
+            _agent_debug_log(
+                run_id="pre-fix",
+                hypothesis_id="H3",
+                location="torch_core.py:445",
+                message="drift_h layout before flatten",
+                data={
+                    "drift_h_shape": list(drift_h.shape),
+                    "drift_h_stride": list(drift_h.stride()),
+                    "drift_h_contiguous": bool(drift_h.is_contiguous()),
+                    "target_shape": [int(b), int(d)],
+                },
+            )
+        # #endregion
 
         out = drift_h.reshape(b, d)
         return out.squeeze(0) if squeeze else out
