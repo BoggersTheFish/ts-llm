@@ -3,8 +3,10 @@ Subword tokenization with :mod:`tiktoken`, with a **word-list fallback** that ma
 legacy :data:`~attractor_llm.model.DEFAULT_VOCAB` toy setup.
 
 When ``tiktoken`` is available, text is encoded with a BPE vocabulary (default **GPT-2**
-``gpt2`` encoding). Token ids are filtered to ``[0, n)`` where ``n = min(vocab_cap, enc.n_vocab)``
-so the learnable embedding table has finite width **without** ambiguous modular decoding.
+``gpt2`` encoding). Token ids are folded into ``[0, n)`` where ``n = min(vocab_cap, enc.n_vocab)``
+via ``t`` if ``t < n`` else ``t % n`` so the embedding table stays finite **without** collapsing
+every OOV-range id onto a single row (which ``clamp`` to ``n-1`` did). Dropping out-of-range
+ids also collapsed unrelated strings when ``n`` was small.
 """
 
 from __future__ import annotations
@@ -63,12 +65,17 @@ class AttractorTokenizer:
         """
         Encode ``text`` to a list of integer ids in ``[0, n_vocab)``.
 
-        In tiktoken mode, ids above ``n_vocab - 1`` are **dropped** (not remapped) so
-        decoding stays well-defined.
+        In tiktoken mode, ids ``t >= n_vocab`` are mapped with ``t % n_vocab`` (ids in range
+        are unchanged). This keeps the full BPE length/order while spreading high ids across
+        embedding rows; clamping them all to ``n_vocab - 1`` made many unrelated prompts
+        identical.
         """
         if self._enc is not None:
             raw = self._enc.encode(text)
-            return [t for t in raw if t < self.n_vocab]
+            n = self.n_vocab
+            if n <= 0:
+                return []
+            return [t if t < n else (t % n) for t in raw]
         return [self._word2id[t] for t in text.split() if t in self._word2id]
 
     def decode(self, ids: Sequence[int]) -> str:
