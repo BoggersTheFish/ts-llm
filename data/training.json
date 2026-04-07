@@ -18,5 +18,14 @@
   "gates": {
     "mean_ce_max": 0.6,
     "ambiguous_entropy_min": null
+  },
+  "contrastive_pairs": [
+    ["the cat chases the dog", "the cat chases the mouse"],
+    ["the cat chases the dog", "the cat chases the bird"],
+    ["the mouse eats the cheese", "the mouse eats the dog"]
+  ],
+  "contrastive": {
+    "lambda": 0.1,
+    "margin": 0.35
   }
 }

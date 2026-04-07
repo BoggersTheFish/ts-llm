@@ -6,14 +6,16 @@ basins for semantic continuations—not attention over the full token history.
 Run after any change: `python eval_harness.py` or `pytest tests/test_eval_harness.py`.
 
 `run_demo` also prints extended attractor diagnostics (relax-until-convergence over probe
-prefixes, stability, interpolation, verb/object/global-basin cosine tables); see README and
-`docs/verified_run.md`.
+prefixes, stability, interpolation, verb/object/global-basin cosine tables), optional
+`cursor_generation` / loop-prevention decoding from `data/prompts.json`, and lightweight
+generation metrics (exact corpus-line match rate, longest repeated n-gram).
 """
 
 from __future__ import annotations
 
 import json
 import os
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +68,29 @@ class TrainingData:
     branch_tests: tuple[tuple[str, str], ...]
     ambiguous_prefix: str
     gates: EvalGates
+    contrastive_pairs: tuple[tuple[str, str], ...]
+    contrastive_lambda: float
+    contrastive_margin: float
+
+
+@dataclass(frozen=True)
+class LoopPreventionConfig:
+    """Optional generation stops: EOS, attractor convergence, repeating n-gram window."""
+
+    enabled: bool = False
+    attractor_cos_threshold: float = 0.99
+    loop_window: int = 5
+    eos_token: str | None = None
+
+
+@dataclass(frozen=True)
+class CursorGenerationConfig:
+    """Cursor-style decode: EOS, sliding repeat window, return to a prior token attractor."""
+
+    enabled: bool = False
+    k_repeat: int = 5
+    attractor_threshold: float = 0.99
+    track_attractors: bool = True
 
 
 @dataclass(frozen=True)
@@ -74,6 +99,10 @@ class PromptsData:
 
     greedy_prefixes: tuple[str, ...]
     greedy_max_len: int
+    greedy_temperature: float
+    greedy_top_k: int | None
+    loop_prevention: LoopPreventionConfig
+    cursor_generation: CursorGenerationConfig
 
 
 def training_data_path() -> Path:
@@ -109,12 +138,22 @@ def load_training_data(path: Path | None = None) -> TrainingData:
         mean_ce_max=float(gr.get("mean_ce_max", 0.35)),
         ambiguous_entropy_min=amb_min,
     )
+    cp_raw = raw.get("contrastive_pairs") or []
+    contrastive_pairs = tuple((str(a), str(b)) for a, b in cp_raw)
+    cconf = raw.get("contrastive") or {}
+    contrastive_margin = float(cconf.get("margin", 0.35))
+    contrastive_lambda = float(cconf.get("lambda", 0.0))
+    if contrastive_pairs and contrastive_lambda == 0.0:
+        contrastive_lambda = 0.1
     return TrainingData(
         corpus=corpus,
         branch_line_count=n_branch,
         branch_tests=tests,
         ambiguous_prefix=amb,
         gates=gates,
+        contrastive_pairs=contrastive_pairs,
+        contrastive_lambda=contrastive_lambda,
+        contrastive_margin=contrastive_margin,
     )
 
 
@@ -128,7 +167,32 @@ def load_prompts(path: Path | None = None) -> PromptsData:
     raw = json.loads(p.read_text(encoding="utf-8"))
     prefixes = tuple(str(s) for s in raw["greedy_prefixes"])
     max_len = int(raw.get("greedy_max_len", 20))
-    return PromptsData(greedy_prefixes=prefixes, greedy_max_len=max_len)
+    temp = float(raw.get("greedy_temperature", 0.0))
+    top_k = raw.get("greedy_top_k")
+    top_k_i = int(top_k) if top_k is not None else None
+    lp_raw = raw.get("loop_prevention") or {}
+    eos_raw = lp_raw.get("eos_token", None)
+    loop_prevention = LoopPreventionConfig(
+        enabled=bool(lp_raw.get("enabled", False)),
+        attractor_cos_threshold=float(lp_raw.get("attractor_cos_threshold", 0.99)),
+        loop_window=int(lp_raw.get("loop_window", 5)),
+        eos_token=str(eos_raw) if eos_raw is not None and str(eos_raw).strip() else None,
+    )
+    cur_raw = raw.get("cursor_generation") or {}
+    cursor_generation = CursorGenerationConfig(
+        enabled=bool(cur_raw.get("enabled", False)),
+        k_repeat=int(cur_raw.get("k_repeat", 5)),
+        attractor_threshold=float(cur_raw.get("attractor_threshold", 0.99)),
+        track_attractors=bool(cur_raw.get("track_attractors", True)),
+    )
+    return PromptsData(
+        greedy_prefixes=prefixes,
+        greedy_max_len=max_len,
+        greedy_temperature=temp,
+        greedy_top_k=top_k_i,
+        loop_prevention=loop_prevention,
+        cursor_generation=cursor_generation,
+    )
 
 
 _TRAINING = load_training_data()
@@ -138,6 +202,13 @@ BRANCH_LINE_COUNT: int = _TRAINING.branch_line_count
 BRANCH_TESTS: list[tuple[str, str]] = list(_TRAINING.branch_tests)
 AMBIGUOUS_PREFIX: str = _TRAINING.ambiguous_prefix
 EVAL_GATES: EvalGates = _TRAINING.gates
+CONTRASTIVE_LAMBDA: float = _TRAINING.contrastive_lambda
+CONTRASTIVE_MARGIN: float = _TRAINING.contrastive_margin
+_STOI_CONTRAST, _ = build_vocab(CORPUS)
+CONTRASTIVE_PAIR_IDS: tuple[tuple[list[int], list[int]], ...] = tuple(
+    (encode(tokenize(a), _STOI_CONTRAST), encode(tokenize(b), _STOI_CONTRAST))
+    for a, b in _TRAINING.contrastive_pairs
+)
 
 
 @dataclass(frozen=True)
@@ -208,6 +279,15 @@ class MinimalAttractorLM(nn.Module):
             h = h.detach()
         return h
 
+    def recurrent_step(
+        self, h: torch.Tensor, token_id: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Inject one token embedding, relax, return (logits, next_hidden). Matches `generate` one step."""
+        x = self.embed(torch.tensor(token_id, device=h.device, dtype=torch.long))
+        h = h + x
+        h = self.relax(h, x)
+        return self.out(h), h
+
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         T = token_ids.size(0)
         device = token_ids.device
@@ -219,6 +299,16 @@ class MinimalAttractorLM(nn.Module):
             h = self.relax(h, x)
             logits_list.append(self.out(h))
         return torch.stack(logits_list, dim=0)
+
+    def final_hidden_for_prefix(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """Same recurrence as forward (no grad through substeps beyond relax); returns final h."""
+        device = token_ids.device
+        h = torch.zeros(self.state_dim, device=device)
+        for t in range(token_ids.size(0)):
+            x = self.embed(token_ids[t])
+            h = h + x
+            h = self.relax(h, x)
+        return h
 
     @torch.no_grad()
     def get_state_for_tokens(self, token_ids: torch.Tensor) -> torch.Tensor:
@@ -276,6 +366,22 @@ class MinimalAttractorLM(nn.Module):
             norm_deltas=deltas,
             possible_limit_cycle=_limit_cycle_from_cosine_history(h_hist),
         )
+
+    @torch.no_grad()
+    def token_level_attractor(
+        self,
+        token_ids: torch.Tensor,
+        *,
+        max_steps: int = 50,
+        tol: float = 1e-4,
+    ) -> torch.Tensor:
+        """Relax from forward state for `token_ids` with last-token embed fixed; returns final h."""
+        h = self.get_state_for_tokens(token_ids)
+        x = self.embed(token_ids[-1])
+        rc = self.relax_until_convergence(
+            h, x_embed=x, max_steps=max_steps, tol=tol
+        )
+        return rc.final_state
 
     @torch.no_grad()
     def trace_states(
@@ -339,6 +445,28 @@ def print_trajectory_norm_report(traj: list[tuple[str, torch.Tensor]]) -> None:
             cos_s = f"cos(prev)={c:.4f}" if c == c else "cos(prev)=nan"
             print(f"{name:<18} norm={nrm:.4f}  {cos_s}")
         prev = hcpu
+
+
+def _print_attractor_norm_summary(
+    converged_np: dict[str, np.ndarray],
+    forward_np: dict[str, np.ndarray],
+    noun_prefixes: list[str],
+) -> None:
+    conv_norms = [float(np.linalg.norm(converged_np[k])) for k in converged_np]
+    ca = np.array(conv_norms, dtype=np.float64)
+    print("\nAttractor norm summary (L2):")
+    print("  converged states (all relax-until-convergence prefixes):")
+    print(
+        f"    mean={ca.mean():.4f}  std={ca.std():.4f}  "
+        f"min={ca.min():.4f}  max={ca.max():.4f}"
+    )
+    fn = [float(np.linalg.norm(forward_np[k])) for k in noun_prefixes]
+    fa = np.array(fn, dtype=np.float64)
+    print("  forward states (noun prefixes only, after relax substeps per token):")
+    print(
+        f"    mean={fa.mean():.4f}  std={fa.std():.4f}  "
+        f"min={fa.min():.4f}  max={fa.max():.4f}"
+    )
 
 
 @torch.no_grad()
@@ -564,10 +692,29 @@ def train_loop(
             logits = model(seq)
             losses.append(F.cross_entropy(logits[:-1], seq[1:]))
         loss = torch.stack(losses).mean()
+        ctr_loss_v = torch.tensor(0.0, device=device)
+        if CONTRASTIVE_LAMBDA > 0.0 and CONTRASTIVE_PAIR_IDS:
+            ctr_terms: list[torch.Tensor] = []
+            for ida, idb in CONTRASTIVE_PAIR_IDS:
+                ta = torch.tensor(ida, dtype=torch.long, device=device)
+                tb = torch.tensor(idb, dtype=torch.long, device=device)
+                ha = model.final_hidden_for_prefix(ta)
+                hb = model.final_hidden_for_prefix(tb)
+                cos = F.cosine_similarity(
+                    ha.unsqueeze(0), hb.unsqueeze(0), dim=1, eps=1e-8
+                )
+                ctr_terms.append(F.relu(cos - CONTRASTIVE_MARGIN).squeeze(0))
+            ctr_loss_v = torch.stack(ctr_terms).mean()
+            loss = loss + CONTRASTIVE_LAMBDA * ctr_loss_v
         loss.backward()
         opt.step()
         if not quiet and (ep % log_every == 0 or ep == epochs - 1):
-            print(f"epoch {ep:4d}  loss {loss.item():.4f}")
+            if CONTRASTIVE_LAMBDA > 0.0 and CONTRASTIVE_PAIR_IDS:
+                print(
+                    f"epoch {ep:4d}  loss {loss.item():.4f}  ctr {float(ctr_loss_v.item()):.4f}"
+                )
+            else:
+                print(f"epoch {ep:4d}  loss {loss.item():.4f}")
 
 
 @torch.no_grad()
@@ -612,6 +759,10 @@ def generate(
     prefix: str,
     max_len: int = 20,
     device: torch.device | None = None,
+    *,
+    temperature: float = 0.0,
+    top_k: int | None = None,
+    generator: torch.Generator | None = None,
 ) -> str:
     model.eval()
     if device is None:
@@ -621,13 +772,266 @@ def generate(
     h = torch.zeros(model.state_dim, device=device)
     out_ids = list(ids)
     for _ in range(max_len):
-        x = model.embed(torch.tensor(out_ids[-1], device=device))
-        h = h + x
-        h = model.relax(h, x)
-        logits = model.out(h)
-        next_id = int(logits.argmax().item())
+        logits, h = model.recurrent_step(h, out_ids[-1])
+        next_id = _sample_next_id(
+            logits, temperature=temperature, top_k=top_k, generator=generator
+        )
         out_ids.append(next_id)
     return " ".join(decode(out_ids, itos))
+
+
+@dataclass
+class GenerationResult:
+    """Autoregressive output plus why generation stopped."""
+
+    text: str
+    token_ids: list[int]
+    reason: str
+
+
+def _sample_next_id(
+    logits: torch.Tensor,
+    *,
+    temperature: float,
+    top_k: int | None,
+    generator: torch.Generator | None,
+) -> int:
+    if temperature <= 0.0:
+        return int(logits.argmax().item())
+    scaled = logits / temperature
+    if top_k is not None and top_k > 0 and top_k < scaled.numel():
+        v, idx = torch.topk(scaled, top_k)
+        mask = torch.full_like(scaled, float("-inf"))
+        mask.scatter_(0, idx, v)
+        scaled = mask
+    probs = torch.softmax(scaled, dim=-1)
+    return int(torch.multinomial(probs, 1, generator=generator).item())
+
+
+@torch.no_grad()
+def generate_with_loop_prevention(
+    model: MinimalAttractorLM,
+    stoi: dict[str, int],
+    itos: list[str],
+    prefix: str,
+    max_steps: int,
+    device: torch.device,
+    *,
+    known_attractors: dict[str, np.ndarray | torch.Tensor] | None = None,
+    attractor_cos_threshold: float = 0.99,
+    eos_token: str | None = None,
+    loop_window: int = 5,
+    temperature: float = 0.0,
+    top_k: int | None = None,
+    generator: torch.Generator | None = None,
+    verbose: bool = False,
+) -> GenerationResult:
+    """
+    Same recurrence as `generate`, with optional early exit on EOS, near-match to
+    precomputed attractor vectors (cosine), or a repeated length-`loop_window` token n-gram.
+    """
+    model.eval()
+    words = tokenize(prefix)
+    prefix_ids = encode(words, stoi)
+    h = torch.zeros(model.state_dim, device=device)
+    out_ids = list(prefix_ids)
+    prefix_len = len(prefix_ids)
+
+    eos_id: int | None = None
+    if eos_token is not None and eos_token in stoi:
+        eos_id = stoi[eos_token]
+
+    attr_tensors: dict[str, torch.Tensor] = {}
+    if known_attractors:
+        for key, vec in known_attractors.items():
+            t = torch.as_tensor(vec, dtype=h.dtype, device=device).reshape(-1)
+            attr_tensors[key] = t
+
+    seen_windows: set[tuple[int, ...]] = set()
+    reason = "max_steps"
+
+    for _step in range(max_steps):
+        logits, h = model.recurrent_step(h, out_ids[-1])
+        next_id = _sample_next_id(
+            logits, temperature=temperature, top_k=top_k, generator=generator
+        )
+        out_ids.append(next_id)
+
+        if eos_id is not None and next_id == eos_id:
+            reason = "eos"
+            if verbose:
+                print("Trajectory terminated: EOS token reached")
+            break
+
+        hit_attractor: str | None = None
+        for aprefix, avec in attr_tensors.items():
+            c = _cosine_consecutive(h, avec)
+            if c == c and c > attractor_cos_threshold:
+                hit_attractor = aprefix
+                break
+        if hit_attractor is not None:
+            reason = f"attractor:{hit_attractor}"
+            if verbose:
+                print(
+                    f"Trajectory terminated: reached attractor for {hit_attractor!r} "
+                    f"(cos>{attractor_cos_threshold})"
+                )
+            break
+
+        generated = out_ids[prefix_len:]
+        if loop_window > 0 and len(generated) >= loop_window:
+            recent = tuple(generated[-loop_window:])
+            if recent in seen_windows:
+                reason = "repeating_window"
+                if verbose:
+                    print("Trajectory terminated: repeating sequence detected")
+                break
+            seen_windows.add(recent)
+
+    text = " ".join(decode(out_ids, itos))
+    return GenerationResult(text=text, token_ids=out_ids, reason=reason)
+
+
+@torch.no_grad()
+def generate_with_cursor(
+    model: MinimalAttractorLM,
+    stoi: dict[str, int],
+    itos: list[str],
+    prefix: str,
+    max_len: int,
+    device: torch.device,
+    *,
+    k_repeat: int = 5,
+    attractor_threshold: float = 0.99,
+    track_attractors: bool = True,
+    eos_token: str | None = None,
+    temperature: float = 0.0,
+    top_k: int | None = None,
+    generator: torch.Generator | None = None,
+    attractor_relax_max_steps: int = 50,
+    attractor_relax_tol: float = 1e-4,
+    verbose: bool = False,
+) -> GenerationResult:
+    """
+    Greedy/sampled continuation with early exit on EOS, repeated length-k token windows
+    in the generated suffix, or forward hidden state cosine-near a prior token-level
+    relaxed attractor (see `token_level_attractor`).
+    """
+    model.eval()
+    words = tokenize(prefix)
+    prefix_ids = encode(words, stoi)
+    prefix_len = len(prefix_ids)
+    h = torch.zeros(model.state_dim, device=device)
+    out_ids = list(prefix_ids)
+
+    eos_id: int | None = None
+    if eos_token is not None and eos_token in stoi:
+        eos_id = stoi[eos_token]
+
+    attractors: list[torch.Tensor] = []
+    if track_attractors:
+        for end in range(1, len(prefix_ids) + 1):
+            tid_pre = torch.tensor(
+                prefix_ids[:end], dtype=torch.long, device=device
+            )
+            a = model.token_level_attractor(
+                tid_pre, max_steps=attractor_relax_max_steps, tol=attractor_relax_tol
+            )
+            attractors.append(a.reshape(-1).clone())
+
+    seen_windows: set[tuple[int, ...]] = set()
+    reason = "max_steps"
+
+    for _step in range(max_len):
+        logits, h = model.recurrent_step(h, out_ids[-1])
+        next_id = _sample_next_id(
+            logits, temperature=temperature, top_k=top_k, generator=generator
+        )
+        out_ids.append(next_id)
+
+        if eos_id is not None and next_id == eos_id:
+            reason = "eos"
+            if verbose:
+                print("Cursor generation stopped: EOS")
+            break
+
+        generated = out_ids[prefix_len:]
+        if k_repeat > 0 and len(generated) >= k_repeat:
+            recent = tuple(generated[-k_repeat:])
+            if recent in seen_windows:
+                reason = "repeating_window"
+                if verbose:
+                    print("Cursor generation stopped: repeating k-token window")
+                break
+            seen_windows.add(recent)
+
+        if track_attractors:
+            tid = torch.tensor(out_ids, dtype=torch.long, device=device)
+            h_full = model.get_state_for_tokens(tid)
+            for prev in attractors:
+                c = _cosine_consecutive(h_full, prev)
+                if c == c and c > attractor_threshold:
+                    reason = "attractor_return"
+                    if verbose:
+                        print(
+                            "Cursor generation stopped: forward state near prior "
+                            f"token attractor (cos>{attractor_threshold})"
+                        )
+                    break
+            else:
+                a_new = model.token_level_attractor(
+                    tid, max_steps=attractor_relax_max_steps, tol=attractor_relax_tol
+                )
+                attractors.append(a_new.reshape(-1).clone())
+                continue
+            break
+
+    text = " ".join(decode(out_ids, itos))
+    return GenerationResult(text=text, token_ids=out_ids, reason=reason)
+
+
+def longest_repeated_ngram_length(
+    seq: Sequence[str], *, max_ngram: int = 5
+) -> int:
+    """Largest n in [2, max_ngram] such that some length-n token n-gram occurs twice."""
+    if len(seq) < 2:
+        return 0
+    best = 0
+    n_hi = min(max_ngram, len(seq))
+    for n in range(2, n_hi + 1):
+        seen: set[tuple[str, ...]] = set()
+        for i in range(len(seq) - n + 1):
+            ng = tuple(seq[i : i + n])
+            if ng in seen:
+                best = max(best, n)
+            else:
+                seen.add(ng)
+    return best
+
+
+def generation_metrics(
+    generated_sequences: Sequence[Sequence[str]],
+    corpus: Collection[str],
+    *,
+    max_ngram: int = 5,
+) -> tuple[float, int]:
+    """
+    Return (exact_match_rate, longest_repeated_ngram_over_sequences).
+    exact_match_rate counts full strings equal to a corpus line (word-for-word join).
+    """
+    if not generated_sequences:
+        return 0.0, 0
+    corpus_set = set(corpus)
+    exact = 0
+    longest_overall = 0
+    for seq in generated_sequences:
+        seq_str = " ".join(seq)
+        if seq_str in corpus_set:
+            exact += 1
+        longest_overall = max(
+            longest_overall, longest_repeated_ngram_length(seq, max_ngram=max_ngram)
+        )
+    return exact / len(generated_sequences), longest_overall
 
 
 def entropy_from_logits(logits: torch.Tensor) -> float:
@@ -878,6 +1282,8 @@ def run_demo(*, include_greedy: bool = True, include_diagnostics: bool = True) -
         if rc.possible_limit_cycle:
             print("  possible limit cycle")
 
+    _print_attractor_norm_summary(converged_np, forward_np, noun_prefixes)
+
     print_attractor_stability_probe(
         model, noun_prefixes, converged_np, stoi, device
     )
@@ -1040,13 +1446,78 @@ def run_demo(*, include_greedy: bool = True, include_diagnostics: bool = True) -
 
     if include_greedy:
         print("\nGreedy generations (prefixes from data/prompts.json):")
+        decode_gen: torch.Generator | None = None
+        if _PROMPTS.greedy_temperature > 0.0:
+            decode_gen = torch.Generator(device=device)
+            decode_gen.manual_seed(EVAL_SEED)
+        lp_cfg = _PROMPTS.loop_prevention
+        cur_cfg = _PROMPTS.cursor_generation
+        gen_word_sequences: list[list[str]] = []
         for p in _PROMPTS.greedy_prefixes:
             if not p or not str(p).strip():
                 continue
-            text = generate(
-                model, stoi, itos, p, max_len=_PROMPTS.greedy_max_len, device=device
-            )
-            print(f"  prefix={p!r} -> {text}")
+            if cur_cfg.enabled:
+                gen_res = generate_with_cursor(
+                    model,
+                    stoi,
+                    itos,
+                    p,
+                    max_len=_PROMPTS.greedy_max_len,
+                    device=device,
+                    k_repeat=cur_cfg.k_repeat,
+                    attractor_threshold=cur_cfg.attractor_threshold,
+                    track_attractors=cur_cfg.track_attractors,
+                    eos_token=lp_cfg.eos_token,
+                    temperature=_PROMPTS.greedy_temperature,
+                    top_k=_PROMPTS.greedy_top_k,
+                    generator=decode_gen,
+                    verbose=True,
+                )
+                print(f"  prefix={p!r} -> {gen_res.text}")
+                print(f"    [stop: {gen_res.reason}]")
+                gen_word_sequences.append(decode(gen_res.token_ids, itos))
+            elif lp_cfg.enabled:
+                gen_res = generate_with_loop_prevention(
+                    model,
+                    stoi,
+                    itos,
+                    p,
+                    max_steps=_PROMPTS.greedy_max_len,
+                    device=device,
+                    known_attractors=converged_np,
+                    attractor_cos_threshold=lp_cfg.attractor_cos_threshold,
+                    eos_token=lp_cfg.eos_token,
+                    loop_window=lp_cfg.loop_window,
+                    temperature=_PROMPTS.greedy_temperature,
+                    top_k=_PROMPTS.greedy_top_k,
+                    generator=decode_gen,
+                    verbose=True,
+                )
+                print(f"  prefix={p!r} -> {gen_res.text}")
+                print(f"    [stop: {gen_res.reason}]")
+                gen_word_sequences.append(decode(gen_res.token_ids, itos))
+            else:
+                text = generate(
+                    model,
+                    stoi,
+                    itos,
+                    p,
+                    max_len=_PROMPTS.greedy_max_len,
+                    device=device,
+                    temperature=_PROMPTS.greedy_temperature,
+                    top_k=_PROMPTS.greedy_top_k,
+                    generator=decode_gen,
+                )
+                print(f"  prefix={p!r} -> {text}")
+                gen_word_sequences.append(tokenize(text))
+
+        corpus_lines = list(CORPUS)
+        em_rate, longest_rep = generation_metrics(
+            gen_word_sequences, corpus_lines, max_ngram=5
+        )
+        print("\nGeneration metrics (full-string corpus match + repeated n-grams):")
+        print(f"  exact_match_rate: {em_rate:.4f}  ({len(gen_word_sequences)} prompts)")
+        print(f"  longest_repeated_ngram (max over prompts): {longest_rep}")
 
     ok, reasons = metrics_passes_gates(m)
     if not ok:

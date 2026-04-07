@@ -10,8 +10,12 @@ Training uses **one cross-entropy loss per sentence** (no concatenation across s
 
 ## Data files
 
-- **[`data/training.json`](data/training.json)** — corpus, oversampling split (`branch_line_count`), next-token test cases (`branch_tests`), optional `ambiguous_prefix`, and optional `gates` (CE / entropy thresholds).
-- **[`data/prompts.json`](data/prompts.json)** — `greedy_prefixes` and `greedy_max_len` for the demo decode loop (tokens must appear in the corpus vocab).
+- **[`data/training.json`](data/training.json)** — corpus, oversampling split (`branch_line_count`), next-token test cases (`branch_tests`), optional `ambiguous_prefix`, optional `gates` (CE / entropy thresholds), optional `contrastive_pairs` and `contrastive` (`lambda`, `margin`) for object-spacing loss in training.
+- **[`data/prompts.json`](data/prompts.json)** — `greedy_prefixes`, `greedy_max_len`, optional `greedy_temperature` and `greedy_top_k` (0 temperature keeps argmax greedy).
+
+To grow the corpus to hundreds of lines, run [`scripts/generate_training_corpus.py`](scripts/generate_training_corpus.py) (or point `TINYLLM_TRAINING_DATA` at the result). **Large corpora make training much slower:** each epoch runs `forward` once per training row (`make_training_ids` oversamples the first `branch_line_count` lines, then includes every other line once).
+
+**Loop prevention (generation):** In [`data/prompts.json`](data/prompts.json), set `"loop_prevention": { "enabled": true, ... }` to use [`generate_with_loop_prevention`](eval_harness.py) in the demo instead of plain `generate`. When enabled, each step uses [`MinimalAttractorLM.recurrent_step`](eval_harness.py) (same dynamics as before), then may stop early on: optional `eos_token` (must be in vocab), cosine similarity above `attractor_cos_threshold` to any vector in `known_attractors` (the demo passes converged diagnostic states), or a repeated length-`loop_window` n-gram of **generated** token ids. Verbose lines print why generation stopped.
 
 Optional env overrides: `TINYLLM_TRAINING_DATA`, `TINYLLM_PROMPTS_DATA` (absolute paths to JSON files).
 

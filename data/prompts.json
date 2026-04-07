@@ -7,5 +7,19 @@
     "the mouse eats the",
     "the"
   ],
-  "greedy_max_len": 28
+  "greedy_max_len": 28,
+  "greedy_temperature": 0.85,
+  "greedy_top_k": 12,
+  "loop_prevention": {
+    "enabled": false,
+    "attractor_cos_threshold": 0.99,
+    "loop_window": 5,
+    "eos_token": null
+  },
+  "cursor_generation": {
+    "enabled": false,
+    "k_repeat": 5,
+    "attractor_threshold": 0.99,
+    "track_attractors": true
+  }
 }
