@@ -2,7 +2,7 @@
 
 Captured with default [`data/training.json`](../data/training.json), [`data/prompts.json`](../data/prompts.json), and harness defaults in [`eval_harness.py`](../eval_harness.py): `EVAL_SEED=0`, `STATE_DIM=32`, `RELAX_STEPS=2`, `RELAX_ALPHA=0.25`, token-conditioned relax `tanh(W h + W_x x)`, `TRAIN_EPOCHS=1500`, CPU.
 
-This transcript includes **forward** prefix cosines, **`relax_until_convergence`** for all diagnostic prefixes (nouns, verbs, basin probes, object phrases), **attractor stability** (Gaussian perturbation recovery), **interpolation** (cat↔dog and verb phrases), **noun / verb / verb-basin / object / global-object** converged-attractor cosine tables, noun–verb comparison, **forward vs converged** cosines, and greedy decodes. Exact floats may differ slightly by PyTorch/hardware.
+This transcript includes **forward** prefix cosines, **`relax_until_convergence`** for all diagnostic prefixes (nouns, verbs, basin probes, object phrases), **attractor stability** (Gaussian perturbation recovery), **interpolation** (cat↔dog and verb phrases), **noun / verb / verb-basin / object / global-object** converged-attractor cosine tables, noun–verb comparison, **forward vs converged** cosines, decodes from `prompts.json` (plain / loop / cursor per config — here **both** `loop_prevention` and `cursor_generation` are **disabled**, with **nonzero temperature** so sampling, not pure argmax), **generation metrics** (`exact_match_rate`, `longest_repeated_ngram`), and gate summary. Training lines include **`ctr`** because `training.json` defines contrastive pairs. Exact floats may differ slightly by PyTorch/hardware.
 
 **Command:**
 
@@ -20,22 +20,22 @@ Corpus pair (first two lines): the cat chases the dog | the dog runs to the barn
   first_divergence_index (after first token)=0 shared_prefix_until_divergence=[]
 
 Training on: ['the cat chases the dog', 'the dog runs to the barn', 'the bird flies in the sky', 'the fish swims in the lake', 'the mouse eats the cheese']
-epoch    0  loss 2.8989
-epoch  100  loss 0.5096
-epoch  200  loss 0.4103
-epoch  300  loss 0.3842
-epoch  400  loss 0.3731
-epoch  500  loss 0.3672
-epoch  600  loss 0.3636
-epoch  700  loss 0.3612
-epoch  800  loss 0.3596
-epoch  900  loss 0.3584
-epoch 1000  loss 0.3575
-epoch 1100  loss 0.3568
-epoch 1200  loss 0.3563
-epoch 1300  loss 0.3558
-epoch 1400  loss 0.3554
-epoch 1499  loss 0.3551
+epoch    0  loss 2.9161  ctr 0.1721
+epoch  100  loss 0.5268  ctr 0.1721
+epoch  200  loss 0.4275  ctr 0.1721
+epoch  300  loss 0.4014  ctr 0.1721
+epoch  400  loss 0.3903  ctr 0.1721
+epoch  500  loss 0.3844  ctr 0.1721
+epoch  600  loss 0.3808  ctr 0.1721
+epoch  700  loss 0.3784  ctr 0.1721
+epoch  800  loss 0.3768  ctr 0.1721
+epoch  900  loss 0.3756  ctr 0.1721
+epoch 1000  loss 0.3747  ctr 0.1721
+epoch 1100  loss 0.3740  ctr 0.1721
+epoch 1200  loss 0.3735  ctr 0.1721
+epoch 1300  loss 0.3730  ctr 0.1721
+epoch 1400  loss 0.3726  ctr 0.1721
+epoch 1499  loss 0.3723  ctr 0.1721
 
 mean_corpus_ce: 0.355128
 next-token tests: 5/5
@@ -133,6 +133,12 @@ the bird flies to the dog
 the bird flies to the mouse
   steps_to_converge=48
   final_norm=3.1481
+
+Attractor norm summary (L2):
+  converged states (all relax-until-convergence prefixes):
+    mean=2.7741  std=0.3699  min=2.0614  max=3.3118
+  forward states (noun prefixes only, after relax substeps per token):
+    mean=4.4209  std=0.6575  min=3.2414  max=5.2708
 
 Attractor stability test:
 # cos ≥ 0.95 → strong attractor basin
@@ -262,15 +268,19 @@ the mouse
   cos(prefix_state , attractor_state)=0.3497
 
 Greedy generations (prefixes from data/prompts.json):
-  prefix='the cat' -> the cat chases the dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn dog runs
-  prefix='the cat chases the' -> the cat chases the mouse eats the cheese lake lake the lake runs to the barn barn barn dog runs to the barn barn dog runs to the barn barn dog runs
-  prefix='the dog' -> the dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn dog runs to the barn
-  prefix='the bird flies' -> the bird flies in the sky the mouse the cheese lake the lake the mouse eats the cheese lake lake the lake runs to the barn barn barn dog runs to
-  prefix='the mouse eats the' -> the mouse eats the mouse eats the cheese lake lake the lake runs to the barn barn barn dog runs to the barn barn dog runs to the barn barn dog runs
-  prefix='the' -> the mouse eats the cheese lake lake the lake runs to the barn barn barn dog runs to the barn barn dog runs to the barn barn dog runs
+  prefix='the cat' -> the cat chases the dog runs to the barn dog runs to the barn barn dog runs to the barn barn barn dog runs to the barn barn dog runs
+  prefix='the cat chases the' -> the cat chases the bird flies in the sky the sky the barn barn to the barn barn barn dog runs to the barn barn dog runs to the barn barn dog
+  prefix='the dog' -> the dog runs to the barn barn barn dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn dog runs to the
+  prefix='the bird flies' -> the bird flies in the sky the mouse the cheese lake lake the dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn
+  prefix='the mouse eats the' -> the mouse eats the cat chases the dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn dog runs to the barn barn dog
+  prefix='the' -> the bird flies in the sky the barn the dog runs to the barn barn barn dog runs to the barn barn dog runs to the barn barn dog
+
+Generation metrics (full-string corpus match + repeated n-grams):
+  exact_match_rate: 0.0000  (6 prompts)
+  longest_repeated_ngram (max over prompts): 5
 
 All gates passed.
 (.venv) boggersthefish@BoggersThePC:~/TinyLLM$ 
 ```
 
-**What this shows:** Next-token tests and gates pass; ambiguous `the` spreads mass across subjects. **Forward** animal-prefix states are moderately correlated; **converged** noun attractors (fixed last-token `x_embed`) can differ sharply (including negative cosines). **Verb-conditioned** converged states show a different similarity pattern than nouns. **Verb basin** rows show identical converged geometry for different subjects with the same final verb token (`chases` vs `runs`), consistent with attractors dominated by last-token conditioning under deep relaxation. **Object** and **global object** matrices separate phrases where the final object token differs (dog vs mouse) from those where only the path differs but the converged state collapses (e.g. three ways to end on `dog`). **Stability** under small Gaussian perturbations returns cosine 1.0 for noun attractors in this run. **Interpolation** tables trace smooth transitions in cosines to endpoint attractors along blended state and embed. **Greedy** decoding still mixes templates; rely on CE, branch tests, and structured geometry metrics for quality.
+**What this shows:** Next-token tests and gates pass; ambiguous `the` spreads mass across subjects. Training logs **`ctr`** while contrastive pairs are configured. **Forward** animal-prefix states are moderately correlated; **converged** noun attractors (fixed last-token `x_embed`) can differ sharply (including negative cosines). **Verb-conditioned** converged states show a different similarity pattern than nouns. **Verb basin** rows show identical converged geometry for different subjects with the same final verb token (`chases` vs `runs`), consistent with attractors dominated by last-token conditioning under deep relaxation. **Object** and **global object** matrices separate phrases where the final object token differs (dog vs mouse) from those where only the path differs but the converged state collapses (e.g. three ways to end on `dog`). **Stability** under small Gaussian perturbations returns cosine 1.0 for noun attractors in this run. **Interpolation** tables trace smooth transitions in cosines to endpoint attractors along blended state and embed. **Decoding** with temperature/top-k still mixes templates; **generation metrics** flag zero exact corpus matches and long repeated n-grams. Rely on CE, branch tests, and structured geometry metrics for harness quality; set `greedy_temperature` to 0 for strict argmax.

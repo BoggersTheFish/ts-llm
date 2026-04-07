@@ -5,64 +5,86 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install runtime dependencies
+# Install runtime dependencies (frozen eval harness)
 pip install -r requirements.txt
+
+# For WikiText-2 training (train.py): datasets + SentencePiece
+pip install -r requirements-wikitext.txt
 
 # Install dev dependencies (adds pytest)
 pip install -r requirements-dev.txt
 
-# Run the demo (train + evaluate + diagnostics)
+# Run the harness demo (train + evaluate + diagnostics + decode + generation metrics)
 python main.py         # same as: python eval_harness.py
 
-# Run tests (fast only)
-pytest tests/test_eval_harness.py
+# WikiText-2 AttractorLM training (see train.py --help for checkpoint, DEQ, etc.)
+python train.py --bpe-model data/bpe/wikitext2_8k
+python train.py --use-deq --bpe-model data/bpe/wikitext2_8k
 
-# Run all tests including the slow full-training regression (~tens of seconds on CPU)
+# Tests: all (skip slow with -m "not slow")
+pytest tests/
+
+# Slow full-training regression for harness (~tens of seconds on CPU)
 pytest tests/test_eval_harness.py -m slow
 
-# Run a single test
-pytest tests/test_eval_harness.py::test_longest_repeated_ngram_length
+# Fast harness unit tests only
+pytest tests/test_eval_harness.py -m "not slow"
 
-# Expand corpus (run once; produces a JSON file you can point TINYLLM_TRAINING_DATA at)
+# Model / DEQ unit tests (no full WikiText train)
+pytest tests/test_model.py tests/test_deq.py
+
+# Expand JSON corpus (point TINYLLM_TRAINING_DATA at output if needed)
 python scripts/generate_training_corpus.py
 ```
 
 Environment overrides: `TINYLLM_TRAINING_DATA` and `TINYLLM_PROMPTS_DATA` accept absolute paths to alternate JSON data files.
 
-Exit code 1 if gate thresholds in `data/training.json` → `gates` are not met.
+`python main.py` exits **1** if gate thresholds in `data/training.json` → `gates` are not met.
 
 ## Architecture
 
-This is a **toy attractor/dynamics language model** — not transformer-based. There is no self-attention. Instead a single hidden state vector `h` (shape `[STATE_DIM]`) relaxes per token via a damped fixed-point iteration:
+### Harness track (`eval_harness.py`, `main.py`)
+
+**Toy attractor/dynamics language model** — not transformer-based. No self-attention. A single hidden state vector `h` (shape `[STATE_DIM]`) relaxes per token via a damped fixed-point iteration:
 
 ```
 h ← h + α · (tanh(W·h + Wₓ·x) − h)
 ```
 
-where `x` is the current token embedding, `RELAX_ALPHA = 0.25`, repeated `RELAX_STEPS` times. The final `h` after processing a prefix is the "attractor state" for that prefix.
+where `x` is the current token embedding, `RELAX_ALPHA = 0.25`, repeated `RELAX_STEPS` times. The final `h` after processing a prefix is the forward “attractor” state for that prefix; diagnostics also use **`relax_until_convergence`** and **`token_level_attractor`** (deep relax with last-token `x` fixed).
+
+### WikiText track (`train.py`, `model.py`, `model_deq.py`)
+
+Larger **fast/slow** recurrent relax LM, BPE tokenization (`tokenizer.py`), document streaming (`data_loader.py`), BPTT-style **`forward_chunked`**, optional **DEQ** for the fast relax (`--use-deq`).
 
 ### Key files
 
-- **`eval_harness.py`** — everything: `MinimalAttractorLM` (the model), training loop (`train_and_evaluate`), greedy/cursor/loop-prevention generation, evaluation metrics, and the `run_demo` entrypoint. Frozen defaults (`EVAL_SEED`, `STATE_DIM`, `RELAX_STEPS`, `TRAIN_EPOCHS`, etc.) live at the top; change them only when intentionally shifting the baseline.
-- **`utils.py`** — word-level tokenization (`tokenize`, `build_vocab`, `encode`, `decode`) and prefix-comparison helpers (`first_divergence_index`, `shared_prefix_until_divergence`).
-- **`state_analysis.py`** — NumPy-only geometry over attractor states: `pairwise_cosine`, `pairwise_euclidean`, `labels_sorted`. Operates on `dict[str, np.ndarray]` produced by `collect_prefix_states`.
-- **`main.py`** — thin shim; delegates to `eval_harness.py`.
-- **`data/training.json`** — corpus, oversampling config (`branch_line_count`), next-token tests (`branch_tests`), gate thresholds (`gates`), optional contrastive-pair loss config.
-- **`data/prompts.json`** — greedy decode prefixes, temperature/top-k, loop-prevention and cursor-generation config.
+- **`eval_harness.py`** — `MinimalAttractorLM`, `train_and_evaluate`, `run_demo`, branch/ambiguous metrics, `generate` / `generate_with_loop_prevention` / `generate_with_cursor`, `generation_metrics`, `longest_repeated_ngram_length`, gates. Frozen defaults (`EVAL_SEED`, `STATE_DIM`, `RELAX_STEPS`, `TRAIN_EPOCHS`, etc.) at top.
+- **`model.py`** / **`model_deq.py`** — `AttractorLM` for WikiText-2.
+- **`train.py`** — WikiText training entrypoint.
+- **`data_loader.py`** — `WikiText2` dataset wrapper (HuggingFace `datasets`).
+- **`tokenizer.py`** — SentencePiece BPE (`BPETokenizer`, `train_bpe`).
+- **`utils.py`** — word-level tokenization for harness (`tokenize`, `build_vocab`, `encode`, `decode`) and prefix helpers.
+- **`state_analysis.py`** — NumPy geometry: `pairwise_cosine`, `pairwise_euclidean`, `labels_sorted`.
+- **`main.py`** — shim to `eval_harness.run_demo`.
+- **`data/training.json`** — harness corpus, `branch_tests`, `gates`, optional `contrastive_*`.
+- **`data/prompts.json`** — decode prefixes, temperature/top-k, `loop_prevention`, `cursor_generation`.
 
-### Training details
+### Harness training details
 
-- One cross-entropy loss **per sentence** (no concatenation across sentence boundaries, so next-token targets are never corrupted at boundaries).
-- Optional contrastive object-spacing loss controlled by `contrastive_lambda` and `contrastive_margin` in `data/training.json`.
-- `branch_line_count` lines are oversampled (`BRANCH_OVERSAMPLE = 4×`) during training; remaining lines are included once per epoch.
+- One cross-entropy loss **per sentence** (no concatenation across sentence boundaries).
+- Optional contrastive object-spacing loss (`contrastive_lambda`, `contrastive_margin`); training log prints **`ctr`** when active.
+- `branch_line_count` lines oversampled (`BRANCH_OVERSAMPLE = 4×`); remaining lines once per epoch.
 
-### Generation modes
+### Generation modes (`data/prompts.json`)
 
-Three decode modes are available, all configured from `data/prompts.json`:
-1. **Greedy** — plain argmax or temperature+top-k sampling.
-2. **Loop prevention** (`loop_prevention.enabled`) — stops on EOS token, cosine similarity to a known attractor above threshold, or a repeated n-gram window in generated tokens.
-3. **Cursor generation** (`cursor_generation.enabled`) — sliding repeat-window stop + optional return-to-prior-attractor stop.
+1. **Plain** — `generate()` only.
+2. **Loop prevention** (`loop_prevention.enabled`) — EOS, cosine to **precomputed** diagnostic attractors, repeated `loop_window` n-gram in generated suffix.
+3. **Cursor** (`cursor_generation.enabled`) — takes precedence over loop prevention: EOS, repeated `k_repeat` window, optional **prior token-level attractor** return (`track_attractors`).
+
+After each demo decode batch, **`generation_metrics`**: `exact_match_rate` vs full training lines, **`longest_repeated_ngram`**.
 
 ### Test structure
 
-`tests/test_eval_harness.py` contains fast unit tests for pure functions and a `@pytest.mark.slow` full training regression that runs `train_and_evaluate` and checks all gate thresholds.
+- **`tests/test_eval_harness.py`** — fast tests (metrics, cursor smoke) + `@pytest.mark.slow` full `train_and_evaluate` + gates.
+- **`tests/test_model.py`**, **`tests/test_deq.py`** — WikiText model pieces.

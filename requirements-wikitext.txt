@@ -1,0 +1,4 @@
+# Extra deps for `python train.py` (WikiText-2 + SentencePiece BPE).
+-r requirements.txt
+datasets>=2.14
+sentencepiece>=0.1.99
