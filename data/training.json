@@ -1,0 +1,22 @@
+{
+  "corpus": [
+    "the cat chases the dog",
+    "the dog runs to the barn",
+    "the bird flies in the sky",
+    "the fish swims in the lake",
+    "the mouse eats the cheese"
+  ],
+  "branch_line_count": 5,
+  "branch_tests": [
+    ["the cat", "chases"],
+    ["the dog", "runs"],
+    ["the bird", "flies"],
+    ["the fish", "swims"],
+    ["the mouse", "eats"]
+  ],
+  "ambiguous_prefix": "the",
+  "gates": {
+    "mean_ce_max": 0.6,
+    "ambiguous_entropy_min": null
+  }
+}

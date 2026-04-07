@@ -1,0 +1,11 @@
+{
+  "greedy_prefixes": [
+    "the cat",
+    "the cat chases the",
+    "the dog",
+    "the bird flies",
+    "the mouse eats the",
+    "the"
+  ],
+  "greedy_max_len": 28
+}
