@@ -68,3 +68,7 @@ The regression test is marked `slow` (~tens of seconds on CPU).
 ## Verified run (documented transcript)
 
 The canonical **full** copy-paste transcript for the current default animal corpus and diagnostics is in **[`docs/verified_run.md`](docs/verified_run.md)** (command, full terminal output, exit code 0).
+
+## License
+
+[MIT](LICENSE).
