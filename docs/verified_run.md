@@ -1,16 +1,22 @@
-# Verified run (full transcript)
+# Verified Run (Full Transcript)
 
-Captured with default [`data/training.json`](../data/training.json), [`data/prompts.json`](../data/prompts.json), and harness defaults in [`eval_harness.py`](../eval_harness.py): `EVAL_SEED=0`, `STATE_DIM=32`, `RELAX_STEPS=2`, `RELAX_ALPHA=0.25`, token-conditioned relax `tanh(W h + W_x x)`, `TRAIN_EPOCHS=1500`, CPU.
+This document records a full, reproducible harness run using:
+- [`data/training.json`](../data/training.json)
+- [`data/prompts.json`](../data/prompts.json)
+- Defaults in [`eval_harness.py`](../eval_harness.py): `EVAL_SEED=0`, `STATE_DIM=32`, `RELAX_STEPS=2`, `RELAX_ALPHA=0.25`, `TRAIN_EPOCHS=1500`
+- CPU execution
 
-This transcript includes **forward** prefix cosines, **`relax_until_convergence`** for all diagnostic prefixes (nouns, verbs, basin probes, object phrases), **attractor stability** (Gaussian perturbation recovery), **interpolation** (cat↔dog and verb phrases), **noun / verb / verb-basin / object / global-object** converged-attractor cosine tables, noun–verb comparison, **forward vs converged** cosines, decodes from `prompts.json` (plain / loop / cursor per config — here **both** `loop_prevention` and `cursor_generation` are **disabled**, with **nonzero temperature** so sampling, not pure argmax), **generation metrics** (`exact_match_rate`, `longest_repeated_ngram`), and gate summary. Training lines include **`ctr`** because `training.json` defines contrastive pairs. Exact floats may differ slightly by PyTorch/hardware.
+The transcript includes forward-state and converged-attractor diagnostics, stability checks, interpolation probes, basin comparisons, decoding outputs, generation metrics, and gate summary. Training logs include `ctr` because contrastive pairs are enabled in `training.json`.
 
-**Command:**
+Small numeric drift across machines is expected (PyTorch and hardware differences).
+
+## Command
 
 ```bash
 python3 main.py
 ```
 
-**Full terminal output (stdout + shell prompts; exit code 0):**
+## Full Terminal Output (Exit Code `0`)
 
 ```
 (.venv) boggersthefish@BoggersThePC:~/TinyLLM$ python3 main.py 
@@ -283,4 +289,12 @@ All gates passed.
 (.venv) boggersthefish@BoggersThePC:~/TinyLLM$ 
 ```
 
-**What this shows:** Next-token tests and gates pass; ambiguous `the` spreads mass across subjects. Training logs **`ctr`** while contrastive pairs are configured. **Forward** animal-prefix states are moderately correlated; **converged** noun attractors (fixed last-token `x_embed`) can differ sharply (including negative cosines). **Verb-conditioned** converged states show a different similarity pattern than nouns. **Verb basin** rows show identical converged geometry for different subjects with the same final verb token (`chases` vs `runs`), consistent with attractors dominated by last-token conditioning under deep relaxation. **Object** and **global object** matrices separate phrases where the final object token differs (dog vs mouse) from those where only the path differs but the converged state collapses (e.g. three ways to end on `dog`). **Stability** under small Gaussian perturbations returns cosine 1.0 for noun attractors in this run. **Interpolation** tables trace smooth transitions in cosines to endpoint attractors along blended state and embed. **Decoding** with temperature/top-k still mixes templates; **generation metrics** flag zero exact corpus matches and long repeated n-grams. Rely on CE, branch tests, and structured geometry metrics for harness quality; set `greedy_temperature` to 0 for strict argmax.
+## Interpretation
+
+This run demonstrates:
+- Branch next-token checks and configured gates pass.
+- The ambiguous prefix `the` distributes probability mass across multiple subjects.
+- Converged attractor geometry differs from forward-pass geometry and reveals clearer basin structure.
+- Generation with nonzero temperature still exhibits template mixing and long repeated n-grams.
+
+For strict argmax decoding, set `greedy_temperature` to `0`.

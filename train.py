@@ -21,6 +21,7 @@ Architecture defaults for Sprint 3
     BPTT chunk = 64 tokens (within-document; h_slow crosses chunk boundaries)
     grad accum = 8 steps → effective batch of ~512 tokens per optimizer step
     lr        = 3e-4, grad clip = 1.0
+    warmup    = 200 steps (linear), then cosine decay to lr * 0.1
 """
 
 from __future__ import annotations
@@ -73,6 +74,39 @@ def perplexity(
 # Training loop
 # ---------------------------------------------------------------------------
 
+@torch.no_grad()
+def _spectral_radius_wff(model: AttractorLM) -> float:
+    """
+    Spectral radius of the fast-relax Jacobian evaluated at h=0, h_slow=0, x=0.
+
+    J = (1 - α)I + α · diag(sech²(bias)) · W_ff
+
+    At the zero point, sech²(W_ff·0 + b + ...) = sech²(b).
+    This is a cheap health check: if ρ(J) > 1, the contraction guarantee
+    is lost and the fast relax may not converge.
+    """
+    d = model.cfg.fast_dim
+    alpha = model.cfg.alpha_fast
+    # Evaluate at h=0, x=0, h_slow=0 → pre-activation = W_ff.bias
+    bias = model.W_ff.bias if model.W_ff.bias is not None else torch.zeros(d)
+    D = 1.0 - torch.tanh(bias) ** 2          # sech² at zero input
+    I = torch.eye(d, device=bias.device, dtype=bias.dtype)
+    J = (1.0 - alpha) * I + alpha * D.unsqueeze(1) * model.W_ff.weight
+    # Spectral radius = max |eigenvalue|. J is generally non-symmetric so
+    # the 2-norm (largest singular value) would overestimate, causing false
+    # instability warnings. eigvals() returns complex values; take abs().max().
+    return float(torch.linalg.eigvals(J).abs().max().item())
+
+
+def _lr_at_step(step: int, total_steps: int, lr_max: float, lr_min: float, warmup_steps: int) -> float:
+    """Linear warmup then cosine decay, clamped at lr_min for step >= total_steps."""
+    if step < warmup_steps:
+        return lr_min + (lr_max - lr_min) * step / max(1, warmup_steps)
+    # Clamp to [0, 1] so remainder-flush steps beyond total_steps stay at lr_min.
+    progress = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
+    return lr_min + 0.5 * (lr_max - lr_min) * (1.0 + math.cos(math.pi * progress))
+
+
 def train(
     model: AttractorLM,
     train_dataset,
@@ -81,6 +115,8 @@ def train(
     *,
     epochs: int = 10,
     lr: float = 3e-4,
+    lr_min_ratio: float = 0.1,
+    warmup_steps: int = 200,
     chunk_size: int = 64,
     grad_accum_steps: int = 8,
     max_grad_norm: float = 1.0,
@@ -93,9 +129,21 @@ def train(
     Documents are processed one at a time; the gradient accumulation
     window is based on update steps, not documents.  h is reset per
     document (inside forward_chunked).
+
+    LR schedule: linear warmup for warmup_steps, then cosine decay to lr * lr_min_ratio.
+    Logged every log_every_steps: loss, current lr, pre-clip grad norm, ρ(J) of W_ff.
     """
     model = model.to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    lr_min = lr * lr_min_ratio
+    opt = torch.optim.Adam(model.parameters(), lr=lr_min)  # starts at lr_min, warmed up
+
+    # Total optimizer steps — ceil so the estimate includes the remainder-flush
+    # step that fires when docs_per_epoch % grad_accum_steps != 0.  The clamp
+    # in _lr_at_step() is still a safety net, but this makes the schedule
+    # endpoint align with the actual last step rather than landing slightly early.
+    docs_per_epoch = len(train_dataset)
+    steps_per_epoch = max(1, math.ceil(docs_per_epoch / grad_accum_steps))
+    total_steps = epochs * steps_per_epoch
 
     best_val_ppl = float("inf")
     global_step = 0
@@ -121,7 +169,16 @@ def train(
             epoch_docs += 1
 
             if (i + 1) % grad_accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                # 3c: capture grad norm before clipping
+                grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm).item()
+                )
+
+                # 3a: apply LR schedule
+                current_lr = _lr_at_step(global_step, total_steps, lr, lr_min, warmup_steps)
+                for pg in opt.param_groups:
+                    pg["lr"] = current_lr
+
                 opt.step()
                 opt.zero_grad()
                 global_step += 1
@@ -129,27 +186,41 @@ def train(
                 accum_loss = torch.tensor(0.0, device=device)
 
                 if global_step % log_every_steps == 0:
+                    # 3b: spectral radius of W_ff Jacobian
+                    rho = _spectral_radius_wff(model)
+                    rho_warn = "  ⚠ ρ>1 contractivity lost" if rho > 1.0 else ""
+
                     elapsed = time.time() - t0
-                    avg_loss = epoch_loss / max(1, global_step % (log_every_steps or 1))
+                    avg_loss = epoch_loss / max(1, global_step)
                     print(
                         f"epoch {epoch:2d}  step {global_step:6d}  "
-                        f"loss {avg_loss:.4f}  elapsed {elapsed:.0f}s"
+                        f"loss {avg_loss:.4f}  lr {current_lr:.2e}  "
+                        f"grad {grad_norm:.3f}  rho {rho:.4f}{rho_warn}  "
+                        f"elapsed {elapsed:.0f}s"
                     )
 
         # Flush any remaining accumulated gradients
         if epoch_docs % grad_accum_steps != 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            grad_norm = float(
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm).item()
+            )
+            current_lr = _lr_at_step(global_step, total_steps, lr, lr_min, warmup_steps)
+            for pg in opt.param_groups:
+                pg["lr"] = current_lr
             opt.step()
             opt.zero_grad()
             global_step += 1
 
         # Validation
         val_ppl = perplexity(model, val_dataset, device, chunk_size=chunk_size)
+        rho = _spectral_radius_wff(model)
         elapsed = time.time() - t0
         print(
-            f"epoch {epoch:2d}  val_ppl={val_ppl:.2f}  "
+            f"epoch {epoch:2d}  val_ppl={val_ppl:.2f}  rho={rho:.4f}  "
             f"docs={epoch_docs}  elapsed={elapsed:.0f}s"
         )
+        if rho > 1.0:
+            print(f"  WARNING: ρ(J)={rho:.4f} > 1 — fast relax may not converge")
 
         if checkpoint_path and val_ppl < best_val_ppl:
             best_val_ppl = val_ppl
@@ -184,6 +255,18 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=64)
     parser.add_argument("--grad-accum", type=int, default=8)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=200,
+        help="Linear LR warmup steps before cosine decay begins",
+    )
+    parser.add_argument(
+        "--lr-min-ratio",
+        type=float,
+        default=0.1,
+        help="Minimum LR as a fraction of --lr (cosine decay floor)",
+    )
     parser.add_argument("--vocab-size", type=int, default=8192)
     parser.add_argument(
         "--bpe-model",
@@ -283,7 +366,8 @@ def main() -> None:
     Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
     print(
         f"\nTraining {args.epochs} epochs  "
-        f"chunk={args.chunk_size}  accum={args.grad_accum}  lr={args.lr}\n"
+        f"chunk={args.chunk_size}  accum={args.grad_accum}  "
+        f"lr={args.lr}  warmup={args.warmup_steps}  lr_min_ratio={args.lr_min_ratio}\n"
     )
     train(
         model,
@@ -292,6 +376,8 @@ def main() -> None:
         device,
         epochs=args.epochs,
         lr=args.lr,
+        lr_min_ratio=args.lr_min_ratio,
+        warmup_steps=args.warmup_steps,
         chunk_size=args.chunk_size,
         grad_accum_steps=args.grad_accum,
         max_grad_norm=args.max_grad_norm,

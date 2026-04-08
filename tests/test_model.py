@@ -190,6 +190,44 @@ def test_gradients_reach_gate_parameters() -> None:
         assert max_grad > 1e-12, f"{name}.grad max={max_grad:.2e}"
 
 
+def test_slow_state_gradient_flows_across_chunk_boundaries() -> None:
+    """
+    With stop_grad_slow=False (default), gradients must flow through h_slow
+    across chunk boundaries, giving W_ss/W_sf larger gradients than when
+    stop_grad_slow=True cuts h_slow at every boundary.
+
+    Uses chunk_size=2 on a 6-token sequence so there are 3 boundaries.
+    """
+    stoi, _ = _vocab()
+    ids = _ids(TOY_CORPUS[0], stoi)  # 6 tokens
+
+    # Gradients with h_slow flowing freely (default)
+    model_free = _model(seed=7)
+    loss_free = model_free.forward_chunked(ids, chunk_size=2, stop_grad_slow=False)
+    loss_free.backward()
+
+    # Gradients with h_slow detached at boundaries (old behaviour)
+    model_cut = _model(seed=7)
+    loss_cut = model_cut.forward_chunked(ids, chunk_size=2, stop_grad_slow=True)
+    loss_cut.backward()
+
+    # W_ss must receive gradient in the free case
+    assert model_free.W_ss.weight.grad is not None
+    grad_free = model_free.W_ss.weight.grad.abs().sum().item()
+    assert grad_free > 1e-10, (
+        f"W_ss.weight grad sum={grad_free:.2e} with stop_grad_slow=False — "
+        "slow state not receiving cross-boundary gradient signal"
+    )
+
+    # Free-flowing h_slow gradient must be at least as large as the cut case
+    # (same or more signal reaches W_ss)
+    grad_cut = model_cut.W_ss.weight.grad.abs().sum().item() if model_cut.W_ss.weight.grad is not None else 0.0
+    assert grad_free >= grad_cut - 1e-12, (
+        f"stop_grad_slow=False produced smaller W_ss grad ({grad_free:.2e}) "
+        f"than stop_grad_slow=True ({grad_cut:.2e})"
+    )
+
+
 def test_no_nan_gradients() -> None:
     """No parameter should have NaN gradients after a forward+backward pass."""
     stoi, _ = _vocab()

@@ -35,6 +35,18 @@ pytest tests/test_model.py tests/test_deq.py
 
 # Expand JSON corpus (point TINYLLM_TRAINING_DATA at output if needed)
 python scripts/generate_training_corpus.py
+
+# Probe attractor geometry (harness mode)
+python scripts/probe_attractors.py
+
+# Probe geometry from a trained checkpoint
+python scripts/probe_attractors.py --checkpoint checkpoints/attractor_lm.pt --bpe-model data/bpe/wikitext2_8k
+
+# Capacity scaling study (show config table only)
+python scripts/capacity_study.py --dry-run
+
+# Capacity scaling study (all configs)
+python scripts/capacity_study.py --all --bpe-model data/bpe/wikitext2_8k --save
 ```
 
 Environment overrides: `TINYLLM_TRAINING_DATA` and `TINYLLM_PROMPTS_DATA` accept absolute paths to alternate JSON data files.
@@ -65,7 +77,7 @@ Larger **fast/slow** recurrent relax LM, BPE tokenization (`tokenizer.py`), docu
 - **`data_loader.py`** — `WikiText2` dataset wrapper (HuggingFace `datasets`).
 - **`tokenizer.py`** — SentencePiece BPE (`BPETokenizer`, `train_bpe`).
 - **`utils.py`** — word-level tokenization for harness (`tokenize`, `build_vocab`, `encode`, `decode`) and prefix helpers.
-- **`state_analysis.py`** — NumPy geometry: `pairwise_cosine`, `pairwise_euclidean`, `labels_sorted`.
+- **`state_analysis.py`** — NumPy geometry: `pairwise_cosine`, `pairwise_euclidean`, `labels_sorted`, `basin_separation_ratio`, `intrinsic_dimensionality`.
 - **`main.py`** — shim to `eval_harness.run_demo`.
 - **`data/training.json`** — harness corpus, `branch_tests`, `gates`, optional `contrastive_*`.
 - **`data/prompts.json`** — decode prefixes, temperature/top-k, `loop_prevention`, `cursor_generation`.
@@ -88,3 +100,4 @@ After each demo decode batch, **`generation_metrics`**: `exact_match_rate` vs fu
 
 - **`tests/test_eval_harness.py`** — fast tests (metrics, cursor smoke) + `@pytest.mark.slow` full `train_and_evaluate` + gates.
 - **`tests/test_model.py`**, **`tests/test_deq.py`** — WikiText model pieces.
+- **`tests/test_state_analysis.py`**, **`tests/test_capacity_study.py`**, **`tests/test_train_utils.py`** — geometry metrics, study tooling, and training utility checks.

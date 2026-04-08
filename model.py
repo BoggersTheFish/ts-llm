@@ -218,13 +218,16 @@ class AttractorLM(nn.Module):
         self,
         token_ids: torch.Tensor,
         chunk_size: int = BPTT_WINDOW,
+        stop_grad_slow: bool = False,
     ) -> torch.Tensor:
         """
         Truncated BPTT over a single document.
 
-        h_fast and h_slow are detached at each chunk boundary, cutting the
-        gradient graph, but both states are carried forward so h_slow
-        accumulates across the full document.
+        h_fast is always detached at chunk boundaries to bound gradient depth.
+        h_slow is detached only when stop_grad_slow=True; by default gradients
+        flow through h_slow across chunk boundaries so that W_ss/W_sf/W_sg_*
+        receive signal from the full document, matching the accumulation
+        behaviour seen at inference.
 
         Returns mean CE loss over all (T-1) next-token predictions.
         """
@@ -237,9 +240,11 @@ class AttractorLM(nn.Module):
         losses: list[torch.Tensor] = []
 
         for start in range(0, T - 1, chunk_size):
-            # Cut gradient at chunk boundary; states still flow forward
+            # Always cut h_fast gradient at chunk boundary
             h_fast = h_fast.detach()
-            h_slow = h_slow.detach()
+            # Only cut h_slow gradient when explicitly requested
+            if stop_grad_slow:
+                h_slow = h_slow.detach()
 
             end = min(start + chunk_size, T - 1)
             chunk_logits: list[torch.Tensor] = []

@@ -276,7 +276,6 @@ class MinimalAttractorLM(nn.Module):
     def relax(self, h: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         for _ in range(self.relax_steps):
             h = self._relax_one_substep(h, x)
-            h = h.detach()
         return h
 
     def recurrent_step(
@@ -301,7 +300,7 @@ class MinimalAttractorLM(nn.Module):
         return torch.stack(logits_list, dim=0)
 
     def final_hidden_for_prefix(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """Same recurrence as forward (no grad through substeps beyond relax); returns final h."""
+        """Same recurrence as forward; returns final h. Gradients flow through relax substeps."""
         device = token_ids.device
         h = torch.zeros(self.state_dim, device=device)
         for t in range(token_ids.size(0)):
